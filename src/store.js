@@ -344,6 +344,24 @@ export const actions = {
     return group.id;
   },
 
+  async updateGroup(id, { name, emoji }) {
+    const old = _state.groups.find((g) => g.id === id);
+    if (!old) return;
+    const patch = {};
+    if (name !== undefined && name.trim() && name.trim() !== old.name) patch.name = name.trim();
+    if (emoji !== undefined && emoji !== old.emoji) patch.emoji = emoji;
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await supabase.from("groups").update(patch).eq("id", id);
+    if (error) return console.error(error);
+    const me = _state.profile;
+    const labelParts = [];
+    if (patch.name) labelParts.push(`renamed "${old.name}" → "${patch.name}"`);
+    if (patch.emoji) labelParts.push(`changed icon`);
+    await logEvent(id, "group_updated",
+      `${me?.displayName ?? "Someone"} ${labelParts.join(" + ")}`);
+    await refresh();
+  },
+
   async deleteGroup(id) {
     const old = _state.groups.find((g) => g.id === id);
     if (!old) return;
@@ -379,6 +397,64 @@ export const actions = {
       message: `${me?.displayName ?? "Someone"} added you to "${group?.name ?? "a group"}"`,
       group_id: groupId,
     });
+    await refresh();
+  },
+
+  // Bulk add — used when picking multiple users from the dropdown.
+  async addRegisteredMembers(groupId, profiles) {
+    if (!profiles?.length) return;
+    const u = userId();
+    const me = _state.profile;
+    const rows = profiles.map((p) => ({
+      group_id: groupId,
+      user_id: p.id,
+      display_name: p.displayName,
+      color: p.color,
+      added_by: u,
+    }));
+    const { error } = await supabase.from("group_members").insert(rows);
+    if (error) {
+      // Postgres unique-violation if any user already in group; skip with warning
+      if (error.code !== "23505") {
+        console.error(error);
+        throw error;
+      }
+    }
+    const group = _state.groups.find((g) => g.id === groupId);
+    const names = profiles.map((p) => p.displayName).join(", ");
+    await logEvent(groupId, "member_added",
+      `${me?.displayName ?? "Someone"} added ${names} to ${group?.name ?? "the group"}`);
+    // Notify each added user
+    const notifRows = profiles.map((p) => ({
+      user_id: p.id,
+      message: `${me?.displayName ?? "Someone"} added you to "${group?.name ?? "a group"}"`,
+      group_id: groupId,
+    }));
+    if (notifRows.length) await supabase.from("notifications").insert(notifRows);
+    await refresh();
+  },
+
+  async updateMember(memberId, { displayName, color }) {
+    let memberDescriptor = null;
+    let groupId = null;
+    for (const g of _state.groups) {
+      const m = g.members.find((x) => x.id === memberId);
+      if (m) { memberDescriptor = m; groupId = g.id; break; }
+    }
+    if (!memberDescriptor) return;
+    const patch = {};
+    if (displayName !== undefined && displayName.trim() && displayName.trim() !== memberDescriptor.displayName) {
+      patch.display_name = displayName.trim();
+    }
+    if (color !== undefined && color !== memberDescriptor.color) patch.color = color;
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await supabase.from("group_members").update(patch).eq("id", memberId);
+    if (error) return console.error(error);
+    const me = _state.profile;
+    if (patch.display_name) {
+      await logEvent(groupId, "member_renamed",
+        `${me?.displayName ?? "Someone"} renamed ${memberDescriptor.displayName} → ${patch.display_name}`);
+    }
     await refresh();
   },
 
@@ -628,9 +704,11 @@ export function fmt(amount) {
 export function eventIcon(type) {
   switch (type) {
     case "group_created":     return "👥";
+    case "group_updated":     return "✏️";
     case "group_deleted":     return "🗑️";
     case "member_added":      return "➕";
     case "member_removed":    return "➖";
+    case "member_renamed":    return "✏️";
     case "expense_added":     return "💸";
     case "expense_deleted":   return "🗑️";
     case "settlement_added":  return "✅";

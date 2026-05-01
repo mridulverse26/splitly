@@ -347,6 +347,8 @@ function GroupDetail({ state, groupId, me, onBack }) {
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showSettle, setShowSettle] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
+  const [showEditGroup, setShowEditGroup] = useState(false);
+  const [editingMemberId, setEditingMemberId] = useState(null);
 
   const expenses = useMemo(
     () => (group ? state.expenses.filter((e) => e.groupId === groupId) : []),
@@ -376,11 +378,25 @@ function GroupDetail({ state, groupId, me, onBack }) {
           Back
         </button>
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-accent-50 text-2xl flex items-center justify-center">{group.emoji ?? "👥"}</div>
-          <div className="flex-1 min-w-0">
-            <h1 className="text-xl font-bold truncate">{group.name}</h1>
+          <button
+            onClick={() => isCreator && setShowEditGroup(true)}
+            disabled={!isCreator}
+            className={`w-12 h-12 rounded-2xl bg-accent-50 text-2xl flex items-center justify-center shrink-0 ${isCreator ? "hover:bg-accent-100 transition" : ""}`}
+            aria-label="Edit group"
+          >{group.emoji ?? "👥"}</button>
+          <button
+            onClick={() => isCreator && setShowEditGroup(true)}
+            disabled={!isCreator}
+            className="flex-1 min-w-0 text-left"
+          >
+            <h1 className="text-xl font-bold truncate flex items-center gap-1.5">
+              {group.name}
+              {isCreator && (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-slate-400 shrink-0"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+              )}
+            </h1>
             <div className="text-xs text-slate-500">{group.members.length} members · {expenses.length} entries</div>
-          </div>
+          </button>
           {isCreator && (
             <button
               onClick={() => { if (confirm(`Delete group "${group.name}"?`)) { actions.deleteGroup(groupId); onBack(); } }}
@@ -417,13 +433,18 @@ function GroupDetail({ state, groupId, me, onBack }) {
               <div key={m.id} className="p-3 flex items-center gap-3">
                 <Avatar person={memberToPerson(m)} size={36} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium flex items-center gap-2">
+                  <div className="text-sm font-medium flex items-center gap-2 flex-wrap">
                     <span className="truncate">{m.displayName}</span>
                     {isMe && <span className="text-xs text-accent-600 font-semibold">you</span>}
                     {isContact && <Badge>contact</Badge>}
                     {!isContact && !isMe && <Badge tone="green">user</Badge>}
                   </div>
                 </div>
+                <button
+                  onClick={() => setEditingMemberId(m.id)}
+                  className="p-2 text-slate-400 hover:text-ink" aria-label="Edit">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                </button>
                 {!isMe && (
                   <button
                     onClick={() => { if (confirm(`Remove ${m.displayName} from the group?`)) actions.removeMember(m.id); }}
@@ -473,7 +494,128 @@ function GroupDetail({ state, groupId, me, onBack }) {
       <AddExpenseModal open={showAddExpense} onClose={() => setShowAddExpense(false)} group={group} me={me} />
       <SettleUpModal open={showSettle} onClose={() => setShowSettle(false)} settlements={settlements} group={group} groupId={groupId} />
       <AddMemberModal open={showAddMember} onClose={() => setShowAddMember(false)} group={group} />
+      <EditGroupModal open={showEditGroup} onClose={() => setShowEditGroup(false)} group={group} />
+      <EditMemberModal
+        open={editingMemberId !== null}
+        onClose={() => setEditingMemberId(null)}
+        member={group.members.find((m) => m.id === editingMemberId) ?? null}
+      />
     </div>
+  );
+}
+
+function EditGroupModal({ open, onClose, group }) {
+  const [name, setName] = useState("");
+  const [emoji, setEmoji] = useState("👥");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open && group) { setName(group.name); setEmoji(group.emoji ?? "👥"); setError(""); }
+  }, [open, group]);
+
+  if (!group) return null;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return setError("Name is required");
+    setBusy(true);
+    await actions.updateGroup(group.id, { name, emoji });
+    setBusy(false);
+    onClose();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit group">
+      <form onSubmit={submit}>
+        <Field label="Group name">
+          <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Icon">
+          <div className="flex flex-wrap gap-2">
+            {["👥","🏖️","🏠","✈️","🍕","🎬","🎉","🚗","🏔️","🛒"].map((em) => (
+              <button key={em} type="button" onClick={() => setEmoji(em)}
+                className={`w-10 h-10 rounded-xl text-xl flex items-center justify-center ${emoji === em ? "bg-accent-50 ring-2 ring-accent-500" : "bg-slate-100 hover:bg-slate-200"}`}>{em}</button>
+            ))}
+          </div>
+        </Field>
+        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+        <Button type="submit" className="w-full" disabled={busy}>{busy ? "Saving…" : "Save changes"}</Button>
+      </form>
+    </Modal>
+  );
+}
+
+function EditMemberModal({ open, onClose, member }) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState("#10b981");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [suggestion, setSuggestion] = useState(null);
+
+  useEffect(() => {
+    if (!open || !member) return;
+    setName(member.displayName);
+    setColor(member.color);
+    setError("");
+    setSuggestion(null);
+    // For registered users, fetch their profile to suggest using their actual display name
+    if (member.userId) {
+      actions.findUserByEmail("").then(() => {}); // noop
+      actions.listProfiles().then((all) => {
+        const p = all.find((x) => x.id === member.userId);
+        if (p && p.displayName !== member.displayName) {
+          setSuggestion(p);
+        }
+      });
+    }
+  }, [open, member]);
+
+  if (!member) return null;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return setError("Name is required");
+    setBusy(true);
+    await actions.updateMember(member.id, { displayName: name, color });
+    setBusy(false);
+    onClose();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit member">
+      <form onSubmit={submit}>
+        <Field label="Display name">
+          <Input autoFocus value={name} onChange={(e) => { setName(e.target.value); setError(""); }} />
+        </Field>
+        {suggestion && (
+          <button
+            type="button"
+            onClick={() => { setName(suggestion.displayName); setColor(suggestion.color); }}
+            className="w-full text-left mb-3 -mt-1 px-3 py-2 bg-accent-50 rounded-xl text-xs flex items-center gap-2 hover:bg-accent-100"
+          >
+            <Avatar person={{ id: suggestion.id, name: suggestion.displayName, color: suggestion.color }} size={20} />
+            <span>Use their profile name: <strong>{suggestion.displayName}</strong></span>
+          </button>
+        )}
+        <Field label="Color">
+          <div className="flex flex-wrap gap-2">
+            {COLORS.map((c) => (
+              <button key={c} type="button" onClick={() => setColor(c)} style={{ background: c }}
+                className={`w-9 h-9 rounded-full transition ${color === c ? "ring-2 ring-offset-2 ring-ink" : "hover:scale-110"}`}
+                aria-label={c} />
+            ))}
+          </div>
+        </Field>
+        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+        <Button type="submit" className="w-full" disabled={busy}>{busy ? "Saving…" : "Save"}</Button>
+        {member.userId && (
+          <p className="text-[11px] text-slate-400 mt-3 text-center leading-relaxed">
+            This only changes how they appear in this group. Their account name stays the same.
+          </p>
+        )}
+      </form>
+    </Modal>
   );
 }
 
@@ -641,13 +783,15 @@ function AddMemberModal({ open, onClose, group }) {
   const [query, setQuery] = useState("");
   const [profiles, setProfiles] = useState([]);
   const [loadingProfiles, setLoadingProfiles] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
   const [contactName, setContactName] = useState("");
   const [error, setError] = useState("");
-  const [busyId, setBusyId] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    setTab("registered"); setQuery(""); setContactName(""); setError(""); setBusyId(null);
+    setTab("registered"); setQuery(""); setContactName(""); setError(""); setBusy(false);
+    setSelectedIds(new Set());
     setLoadingProfiles(true);
     actions.listProfiles().then((list) => {
       setProfiles(list);
@@ -656,27 +800,41 @@ function AddMemberModal({ open, onClose, group }) {
   }, [open]);
 
   const myId = state.session?.user?.id;
-  const memberIds = new Set(group.members.map((m) => m.userId).filter(Boolean));
-  // Exclude self + already-added members; filter by query (matches name or email)
+  const memberUserIds = new Set(group.members.map((m) => m.userId).filter(Boolean));
   const q = query.trim().toLowerCase();
   const visibleProfiles = profiles
-    .filter((p) => p.id !== myId && !memberIds.has(p.id))
+    .filter((p) => p.id !== myId && !memberUserIds.has(p.id))
     .filter((p) =>
-      !q ||
-      p.displayName.toLowerCase().includes(q) ||
-      p.email.toLowerCase().includes(q)
+      !q || p.displayName.toLowerCase().includes(q) || p.email.toLowerCase().includes(q)
     );
 
-  const addRegistered = async (profile) => {
-    setBusyId(profile.id);
+  const toggle = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    if (visibleProfiles.every((p) => selectedIds.has(p.id))) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(visibleProfiles.map((p) => p.id)));
+    }
+  };
+
+  const addSelected = async () => {
+    const picked = profiles.filter((p) => selectedIds.has(p.id));
+    if (!picked.length) return;
+    setBusy(true);
     setError("");
     try {
-      await actions.addRegisteredMember(group.id, profile.id, profile);
+      await actions.addRegisteredMembers(group.id, picked);
       onClose();
     } catch (err) {
       setError(err.message);
     } finally {
-      setBusyId(null);
+      setBusy(false);
     }
   };
 
@@ -684,23 +842,26 @@ function AddMemberModal({ open, onClose, group }) {
     e.preventDefault();
     setError("");
     if (!contactName.trim()) return setError("Name is required");
-    setBusyId("contact");
+    setBusy(true);
     try {
       await actions.addContactMember(group.id, contactName);
       onClose();
     } catch (err) {
       setError(err.message);
     } finally {
-      setBusyId(null);
+      setBusy(false);
     }
   };
 
+  const allChecked =
+    visibleProfiles.length > 0 && visibleProfiles.every((p) => selectedIds.has(p.id));
+
   return (
-    <Modal open={open} onClose={onClose} title="Add member">
+    <Modal open={open} onClose={onClose} title="Add members">
       <div className="flex bg-slate-100 rounded-xl p-1 mb-4 text-sm font-semibold">
         <button type="button" onClick={() => setTab("registered")}
           className={`flex-1 py-1.5 rounded-lg ${tab === "registered" ? "bg-white shadow-sm text-ink" : "text-slate-500"}`}>
-          Registered user
+          Registered users
         </button>
         <button type="button" onClick={() => setTab("contact")}
           className={`flex-1 py-1.5 rounded-lg ${tab === "contact" ? "bg-white shadow-sm text-ink" : "text-slate-500"}`}>
@@ -712,16 +873,23 @@ function AddMemberModal({ open, onClose, group }) {
         <>
           <Field label="Search by name or email">
             <Input
-              autoFocus
-              autoCapitalize="none"
-              autoCorrect="off"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              autoFocus autoCapitalize="none" autoCorrect="off"
+              value={query} onChange={(e) => setQuery(e.target.value)}
               placeholder="Type to filter…"
             />
           </Field>
 
-          <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+          {!loadingProfiles && visibleProfiles.length > 0 && (
+            <div className="flex items-center justify-between mb-2 px-1">
+              <button type="button" onClick={toggleAll}
+                className="text-xs font-semibold text-accent-600">
+                {allChecked ? "Clear all" : "Select all"}
+              </button>
+              <span className="text-xs text-slate-500">{selectedIds.size} selected</span>
+            </div>
+          )}
+
+          <div className="border border-slate-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
             {loadingProfiles ? (
               <div className="p-4 text-sm text-slate-500 text-center">Loading users…</div>
             ) : visibleProfiles.length === 0 ? (
@@ -730,33 +898,39 @@ function AddMemberModal({ open, onClose, group }) {
               </div>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {visibleProfiles.map((p) => (
-                  <li key={p.id}>
-                    <button
-                      onClick={() => addRegistered(p)}
-                      disabled={busyId === p.id}
-                      className="w-full text-left p-3 flex items-center gap-3 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      <Avatar person={{ id: p.id, name: p.displayName, color: p.color }} size={32} />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm truncate">{p.displayName}</div>
-                        <div className="text-xs text-slate-500 truncate">{p.email}</div>
-                      </div>
-                      <span className="text-xs text-accent-600 font-semibold">
-                        {busyId === p.id ? "Adding…" : "+ Add"}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                {visibleProfiles.map((p) => {
+                  const checked = selectedIds.has(p.id);
+                  return (
+                    <li key={p.id}>
+                      <label className={`w-full text-left p-3 flex items-center gap-3 cursor-pointer ${checked ? "bg-accent-50" : "hover:bg-slate-50"}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggle(p.id)}
+                          className="w-4 h-4 accent-accent-600 shrink-0"
+                        />
+                        <Avatar person={{ id: p.id, name: p.displayName, color: p.color }} size={32} />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium text-sm truncate">{p.displayName}</div>
+                          <div className="text-xs text-slate-500 truncate">{p.email}</div>
+                        </div>
+                      </label>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
 
           {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
 
-          <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
-            Pick anyone who's signed up to Splitly. They'll see this group and can add expenses.
-          </p>
+          <Button
+            onClick={addSelected}
+            disabled={selectedIds.size === 0 || busy}
+            className="w-full mt-4"
+          >
+            {busy ? "Adding…" : selectedIds.size === 0 ? "Select users to add" : `Add ${selectedIds.size} ${selectedIds.size === 1 ? "member" : "members"}`}
+          </Button>
         </>
       ) : (
         <form onSubmit={addContact}>
@@ -765,8 +939,8 @@ function AddMemberModal({ open, onClose, group }) {
               placeholder="e.g. Dad, Roommate, Bob" />
           </Field>
           {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-          <Button type="submit" className="w-full" disabled={busyId === "contact"}>
-            {busyId === "contact" ? "Adding…" : "Add contact"}
+          <Button type="submit" className="w-full" disabled={busy}>
+            {busy ? "Adding…" : "Add contact"}
           </Button>
           <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
             Contacts don't have an account — they're just a name to track splits with.

@@ -141,6 +141,9 @@ create policy "add members" on group_members for insert
     -- bootstrapping yourself (added_by = auth.uid() AND adding self user row).
     is_group_member(group_id, auth.uid()) or added_by = auth.uid()
   );
+create policy "update members" on group_members for update
+  using (is_group_member(group_id, auth.uid()))
+  with check (is_group_member(group_id, auth.uid()));
 create policy "remove members" on group_members for delete
   using (is_group_member(group_id, auth.uid()));
 
