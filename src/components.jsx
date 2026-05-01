@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 
 export function Avatar({ person, size = 36 }) {
   if (!person) return null;
@@ -48,11 +49,22 @@ export function Modal({ open, onClose, title, children }) {
     if (!open) return;
     const onKey = (e) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
   }, [open, onClose]);
   if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40" onClick={onClose}>
+  // Portal to document.body so the modal escapes any ancestor that creates a
+  // containing block for fixed positioning (e.g. the sticky header which uses
+  // backdrop-filter for the frosted-glass effect).
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
       <div
         className="bg-white w-full sm:max-w-md sm:mx-4 rounded-t-3xl sm:rounded-2xl p-5 anim-slide max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
@@ -67,7 +79,8 @@ export function Modal({ open, onClose, title, children }) {
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
