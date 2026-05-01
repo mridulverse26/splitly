@@ -297,6 +297,19 @@ export const actions = {
     return data ? mapProfile(data) : null;
   },
 
+  // Returns all profiles (used to populate the member-picker dropdown).
+  async listProfiles() {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .order("display_name", { ascending: true });
+    if (error) {
+      console.error(error);
+      return [];
+    }
+    return (data ?? []).map(mapProfile);
+  },
+
   /* ----- Groups ----- */
   async addGroup(name, emoji = "👥") {
     const trimmed = name.trim();

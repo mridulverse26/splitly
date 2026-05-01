@@ -636,45 +636,47 @@ function SettleUpModal({ open, onClose, settlements, group, groupId }) {
 /* ---------------- Add member modal (registered user OR contact) ---------------- */
 
 function AddMemberModal({ open, onClose, group }) {
+  const state = useStore();
   const [tab, setTab] = useState("registered");
-  const [email, setEmail] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [foundUser, setFoundUser] = useState(null);
+  const [query, setQuery] = useState("");
+  const [profiles, setProfiles] = useState([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [contactName, setContactName] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState(null);
 
   useEffect(() => {
-    if (open) {
-      setTab("registered");
-      setEmail(""); setFoundUser(null); setContactName(""); setError(""); setLoading(false);
-    }
+    if (!open) return;
+    setTab("registered"); setQuery(""); setContactName(""); setError(""); setBusyId(null);
+    setLoadingProfiles(true);
+    actions.listProfiles().then((list) => {
+      setProfiles(list);
+      setLoadingProfiles(false);
+    });
   }, [open]);
 
-  const search = async (e) => {
-    e.preventDefault();
-    setError("");
-    setFoundUser(null);
-    if (!email.trim()) return setError("Enter an email");
-    setSearching(true);
-    const profile = await actions.findUserByEmail(email);
-    setSearching(false);
-    if (!profile) return setError("No registered user with that email");
-    if (group.members.some((m) => m.userId === profile.id))
-      return setError(`${profile.displayName} is already in this group`);
-    setFoundUser(profile);
-  };
+  const myId = state.session?.user?.id;
+  const memberIds = new Set(group.members.map((m) => m.userId).filter(Boolean));
+  // Exclude self + already-added members; filter by query (matches name or email)
+  const q = query.trim().toLowerCase();
+  const visibleProfiles = profiles
+    .filter((p) => p.id !== myId && !memberIds.has(p.id))
+    .filter((p) =>
+      !q ||
+      p.displayName.toLowerCase().includes(q) ||
+      p.email.toLowerCase().includes(q)
+    );
 
-  const addRegistered = async () => {
-    if (!foundUser) return;
-    setLoading(true);
+  const addRegistered = async (profile) => {
+    setBusyId(profile.id);
+    setError("");
     try {
-      await actions.addRegisteredMember(group.id, foundUser.id, foundUser);
+      await actions.addRegisteredMember(group.id, profile.id, profile);
       onClose();
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      setBusyId(null);
     }
   };
 
@@ -682,14 +684,14 @@ function AddMemberModal({ open, onClose, group }) {
     e.preventDefault();
     setError("");
     if (!contactName.trim()) return setError("Name is required");
-    setLoading(true);
+    setBusyId("contact");
     try {
       await actions.addContactMember(group.id, contactName);
       onClose();
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      setBusyId(null);
     }
   };
 
@@ -708,35 +710,52 @@ function AddMemberModal({ open, onClose, group }) {
 
       {tab === "registered" ? (
         <>
-          <form onSubmit={search}>
-            <Field label="Email">
-              <Input autoFocus type="email" autoCapitalize="none" autoCorrect="off"
-                value={email} onChange={(e) => { setEmail(e.target.value); setFoundUser(null); }}
-                placeholder="user@example.com" />
-            </Field>
-            <Button type="submit" variant="ghost" className="w-full" disabled={searching}>
-              {searching ? "Searching…" : "Find user"}
-            </Button>
-          </form>
+          <Field label="Search by name or email">
+            <Input
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect="off"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Type to filter…"
+            />
+          </Field>
 
-          {foundUser && (
-            <div className="mt-4 p-3 bg-accent-50 rounded-xl flex items-center gap-3">
-              <Avatar person={{ id: foundUser.id, name: foundUser.displayName, color: foundUser.color }} size={36} />
-              <div className="flex-1 min-w-0">
-                <div className="font-semibold text-sm truncate">{foundUser.displayName}</div>
-                <div className="text-xs text-slate-500 truncate">{foundUser.email}</div>
+          <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+            {loadingProfiles ? (
+              <div className="p-4 text-sm text-slate-500 text-center">Loading users…</div>
+            ) : visibleProfiles.length === 0 ? (
+              <div className="p-4 text-sm text-slate-500 text-center">
+                {q ? "No users match that search." : "No more registered users to add."}
               </div>
-              <Button onClick={addRegistered} disabled={loading} className="text-xs px-3 py-1.5">
-                {loading ? "Adding…" : "Add"}
-              </Button>
-            </div>
-          )}
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {visibleProfiles.map((p) => (
+                  <li key={p.id}>
+                    <button
+                      onClick={() => addRegistered(p)}
+                      disabled={busyId === p.id}
+                      className="w-full text-left p-3 flex items-center gap-3 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <Avatar person={{ id: p.id, name: p.displayName, color: p.color }} size={32} />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm truncate">{p.displayName}</div>
+                        <div className="text-xs text-slate-500 truncate">{p.email}</div>
+                      </div>
+                      <span className="text-xs text-accent-600 font-semibold">
+                        {busyId === p.id ? "Adding…" : "+ Add"}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
           {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
 
           <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
-            Only users who have signed up to Splitly can be added this way.<br />
-            They'll see this group and can add expenses themselves.
+            Pick anyone who's signed up to Splitly. They'll see this group and can add expenses.
           </p>
         </>
       ) : (
@@ -746,8 +765,8 @@ function AddMemberModal({ open, onClose, group }) {
               placeholder="e.g. Dad, Roommate, Bob" />
           </Field>
           {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-          <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? "Adding…" : "Add contact"}
+          <Button type="submit" className="w-full" disabled={busyId === "contact"}>
+            {busyId === "contact" ? "Adding…" : "Add contact"}
           </Button>
           <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
             Contacts don't have an account — they're just a name to track splits with.
