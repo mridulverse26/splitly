@@ -3,7 +3,8 @@ import {
   useStore,
   actions,
   auth,
-  currentPerson,
+  currentProfile,
+  myMemberInGroup,
   groupBalances,
   simplifyDebts,
   userTotalsAcrossGroups,
@@ -16,21 +17,17 @@ import { LoginScreen } from "./auth";
 
 export default function App() {
   const state = useStore();
-  const me = currentPerson(state);
+  const me = currentProfile(state);
   const [view, setView] = useState({ name: "home" });
 
-  // Initial auth resolution
-  if (state.loading && !state.session) {
-    return <SplashLoader label="Loading…" />;
-  }
+  if (state.loading && !state.session) return <SplashLoader label="Loading…" />;
   if (!state.session) return <LoginScreen />;
-  // Signed in, but profile/people not loaded yet (or failed)
   if (!me) {
     if (state.error) return <SetupError message={state.error} />;
     return <SplashLoader label="Setting up your account…" />;
   }
 
-  const unread = state.notifications.filter((n) => n.toPersonId === me.id && !n.read).length;
+  const unread = state.notifications.filter((n) => !n.read).length;
 
   return (
     <div className="min-h-full max-w-md mx-auto pb-24 relative">
@@ -38,33 +35,22 @@ export default function App() {
 
       <main className="px-4 pt-2">
         {view.name === "home" && (
-          <Home
-            state={state}
-            me={me}
+          <Home state={state} me={me}
             onOpenGroup={(id) => setView({ name: "group", id })}
-            onGoGroups={() => setView({ name: "groups" })}
-          />
+            onGoGroups={() => setView({ name: "groups" })} />
         )}
         {view.name === "groups" && (
           <Groups state={state} me={me} onOpenGroup={(id) => setView({ name: "group", id })} />
         )}
         {view.name === "group" && (
-          <GroupDetail
-            state={state}
-            groupId={view.id}
-            me={me}
-            onBack={() => setView({ name: "groups" })}
-          />
+          <GroupDetail state={state} groupId={view.id} me={me}
+            onBack={() => setView({ name: "groups" })} />
         )}
-        {view.name === "people" && <People state={state} me={me} />}
         {view.name === "history" && <History state={state} />}
         {view.name === "notifs" && (
-          <Notifications
-            state={state}
-            me={me}
+          <Notifications state={state} me={me}
             onBack={() => setView({ name: "home" })}
-            onOpenGroup={(id) => setView({ name: "group", id })}
-          />
+            onOpenGroup={(id) => setView({ name: "group", id })} />
         )}
       </main>
 
@@ -77,6 +63,7 @@ export default function App() {
 
 function Header({ me, unread, onNotifClick }) {
   const [open, setOpen] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   return (
     <header className="sticky top-0 z-30 bg-cream/85 backdrop-blur-sm">
       <div className="flex items-center justify-between px-4 py-3">
@@ -98,20 +85,27 @@ function Header({ me, unread, onNotifClick }) {
           </button>
           <div className="relative">
             <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 px-2 py-1.5 rounded-full hover:bg-slate-100">
-              <Avatar person={me} size={28} />
+              <Avatar person={profileToPerson(me)} size={28} />
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             {open && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                <div className="absolute right-0 top-full mt-1 w-56 bg-white rounded-xl shadow-soft border border-slate-100 py-1 z-20 anim-slide">
+                <div className="absolute right-0 top-full mt-1 w-60 bg-white rounded-xl shadow-soft border border-slate-100 py-1 z-20 anim-slide">
                   <div className="px-3 py-2 flex items-center gap-2 border-b border-slate-100">
-                    <Avatar person={me} size={32} />
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold truncate">{me.name}</div>
-                      <div className="text-xs text-slate-400">signed in</div>
+                    <Avatar person={profileToPerson(me)} size={32} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-semibold truncate">{me.displayName}</div>
+                      <div className="text-xs text-slate-400 truncate">{me.email}</div>
                     </div>
                   </div>
+                  <button
+                    onClick={() => { setOpen(false); setShowProfile(true); }}
+                    className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 flex items-center gap-2"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                    Edit profile
+                  </button>
                   <button
                     onClick={() => { setOpen(false); auth.signOut(); }}
                     className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 flex items-center gap-2 text-red-600"
@@ -125,7 +119,59 @@ function Header({ me, unread, onNotifClick }) {
           </div>
         </div>
       </div>
+      <ProfileEditor open={showProfile} onClose={() => setShowProfile(false)} me={me} />
     </header>
+  );
+}
+
+function profileToPerson(p) {
+  return p ? { id: p.id, name: p.displayName, color: p.color } : null;
+}
+function memberToPerson(m) {
+  return m ? { id: m.id, name: m.displayName, color: m.color } : null;
+}
+
+/* ---------------- Profile editor ---------------- */
+
+const COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#6366f1","#84cc16"];
+
+function ProfileEditor({ open, onClose, me }) {
+  const [displayName, setDisplayName] = useState(me?.displayName ?? "");
+  const [color, setColor] = useState(me?.color ?? "#10b981");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (open) { setDisplayName(me?.displayName ?? ""); setColor(me?.color ?? "#10b981"); setError(""); }
+  }, [open, me]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!displayName.trim()) return setError("Name is required");
+    await actions.updateProfile({ displayName, color });
+    onClose();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit profile">
+      <form onSubmit={submit}>
+        <Field label="Display name">
+          <Input autoFocus value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </Field>
+        <Field label="Color">
+          <div className="flex flex-wrap gap-2">
+            {COLORS.map((c) => (
+              <button key={c} type="button" onClick={() => setColor(c)}
+                style={{ background: c }}
+                className={`w-9 h-9 rounded-full transition ${color === c ? "ring-2 ring-offset-2 ring-ink" : "hover:scale-110"}`}
+                aria-label={c}
+              />
+            ))}
+          </div>
+        </Field>
+        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+        <Button type="submit" className="w-full">Save</Button>
+      </form>
+    </Modal>
   );
 }
 
@@ -137,7 +183,7 @@ function Home({ state, me, onOpenGroup, onGoGroups }) {
   return (
     <div className="space-y-4">
       <div className="pt-2">
-        <div className="text-sm text-slate-500">Hi, {me.name.split(" ")[0]}</div>
+        <div className="text-sm text-slate-500">Hi, {me.displayName.split(" ")[0]}</div>
         <h1 className="text-2xl font-bold tracking-tight">Your balance</h1>
       </div>
 
@@ -158,25 +204,24 @@ function Home({ state, me, onOpenGroup, onGoGroups }) {
         </div>
       </Card>
 
-      {Object.keys(totals.perPerson).length > 0 && (
+      {Object.keys(totals.perUser).length > 0 && (
         <div>
           <div className="text-sm font-semibold text-slate-600 mb-2 px-1">Per person</div>
           <Card className="divide-y divide-slate-100">
-            {Object.entries(totals.perPerson).map(([pid, amt]) => {
-              const p = state.people.find((x) => x.id === pid);
-              if (!p) return null;
-              return (
-                <div key={pid} className="flex items-center gap-3 p-3">
-                  <Avatar person={p} size={36} />
-                  <div className="flex-1">
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-slate-500">{amt > 0 ? "owes you" : "you owe"}</div>
-                  </div>
-                  <div className={`font-bold ${amt > 0 ? "text-accent-600" : "text-red-500"}`}>{fmt(amt)}</div>
+            {Object.entries(totals.perUser).map(([uid, info]) => (
+              <div key={uid} className="flex items-center gap-3 p-3">
+                <Avatar person={{ id: uid, name: info.displayName, color: info.color }} size={36} />
+                <div className="flex-1">
+                  <div className="font-medium">{info.displayName}</div>
+                  <div className="text-xs text-slate-500">{info.amount > 0 ? "owes you" : "you owe"}</div>
                 </div>
-              );
-            })}
+                <div className={`font-bold ${info.amount > 0 ? "text-accent-600" : "text-red-500"}`}>{fmt(info.amount)}</div>
+              </div>
+            ))}
           </Card>
+          <div className="text-[11px] text-slate-400 px-1 mt-1.5">
+            Across-group totals only count registered users. Contacts show within their group.
+          </div>
         </div>
       )}
 
@@ -186,10 +231,10 @@ function Home({ state, me, onOpenGroup, onGoGroups }) {
           <button onClick={onGoGroups} className="text-xs text-accent-600 font-semibold">See all</button>
         </div>
         <div className="space-y-2">
-          {state.groups.filter((g) => g.memberIds.includes(me.id)).slice(0, 4).map((g) => (
+          {state.groups.slice(0, 4).map((g) => (
             <GroupRow key={g.id} state={state} me={me} group={g} onClick={() => onOpenGroup(g.id)} />
           ))}
-          {state.groups.filter((g) => g.memberIds.includes(me.id)).length === 0 && (
+          {state.groups.length === 0 && (
             <EmptyState icon="👥" title="No groups yet" subtitle="Create your first group to start splitting." />
           )}
         </div>
@@ -200,15 +245,18 @@ function Home({ state, me, onOpenGroup, onGoGroups }) {
 
 function GroupRow({ state, me, group, onClick }) {
   const net = userGroupNet(state, me.id, group.id);
+  const inGroup = group.members.some((m) => m.userId === me.id);
   return (
     <Card className="p-4 flex items-center gap-3" onClick={onClick}>
       <div className="w-10 h-10 rounded-xl bg-accent-50 text-xl flex items-center justify-center shrink-0">{group.emoji ?? "👥"}</div>
       <div className="flex-1 min-w-0">
         <div className="font-semibold truncate">{group.name}</div>
-        <div className="text-xs text-slate-500">{group.memberIds.length} members</div>
+        <div className="text-xs text-slate-500">{group.members.length} members</div>
       </div>
       <div className="text-right">
-        {Math.abs(net) < 0.01 ? (
+        {!inGroup ? (
+          <Badge>view only</Badge>
+        ) : Math.abs(net) < 0.01 ? (
           <Badge>settled</Badge>
         ) : (
           <>
@@ -221,7 +269,7 @@ function GroupRow({ state, me, group, onClick }) {
   );
 }
 
-/* ---------------- Groups ---------------- */
+/* ---------------- Groups list ---------------- */
 
 function Groups({ state, me, onOpenGroup }) {
   const [showAdd, setShowAdd] = useState(false);
@@ -232,12 +280,9 @@ function Groups({ state, me, onOpenGroup }) {
         <Button onClick={() => setShowAdd(true)}>+ New</Button>
       </div>
       {state.groups.length === 0 ? (
-        <EmptyState
-          icon="👥"
-          title="No groups"
-          subtitle="Create a group to start splitting expenses."
-          action={<Button onClick={() => setShowAdd(true)}>Create group</Button>}
-        />
+        <EmptyState icon="👥" title="No groups yet"
+          subtitle="Create a group, then add members by their email or as contacts."
+          action={<Button onClick={() => setShowAdd(true)}>Create group</Button>} />
       ) : (
         <div className="space-y-2">
           {state.groups.map((g) => (
@@ -245,38 +290,33 @@ function Groups({ state, me, onOpenGroup }) {
           ))}
         </div>
       )}
-      <AddGroupModal open={showAdd} onClose={() => setShowAdd(false)} state={state} me={me} />
+      <AddGroupModal open={showAdd} onClose={() => setShowAdd(false)}
+        onCreated={(id) => onOpenGroup(id)} />
     </div>
   );
 }
 
-function AddGroupModal({ open, onClose, state, me }) {
+function AddGroupModal({ open, onClose, onCreated }) {
   const [name, setName] = useState("");
   const [emoji, setEmoji] = useState("👥");
-  const [memberIds, setMemberIds] = useState([]);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  // Reset form to defaults when modal opens
-  useEffect(() => {
-    if (open) {
-      setName("");
-      setEmoji("👥");
-      setMemberIds(state.people.map((p) => p.id));
-      setError("");
-    }
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setName(""); setEmoji("👥"); setError(""); } }, [open]);
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
-    if (!name.trim()) return setError("Group name is required");
-    if (memberIds.length < 2) return setError("Pick at least 2 members");
-    if (!memberIds.includes(me.id)) return setError("You should be a member of the group");
-    actions.addGroup(name, memberIds, emoji);
-    onClose();
+    if (!name.trim()) return setError("Name is required");
+    setLoading(true);
+    const id = await actions.addGroup(name, emoji);
+    setLoading(false);
+    if (id) {
+      onClose();
+      onCreated?.(id);
+    } else {
+      setError("Couldn't create group");
+    }
   };
-
-  const toggle = (id) =>
-    setMemberIds((m) => (m.includes(id) ? m.filter((x) => x !== id) : [...m, id]));
 
   return (
     <Modal open={open} onClose={onClose} title="New group">
@@ -287,47 +327,26 @@ function AddGroupModal({ open, onClose, state, me }) {
         <Field label="Icon">
           <div className="flex flex-wrap gap-2">
             {["👥","🏖️","🏠","✈️","🍕","🎬","🎉","🚗","🏔️","🛒"].map((em) => (
-              <button
-                key={em}
-                type="button"
-                onClick={() => setEmoji(em)}
-                className={`w-10 h-10 rounded-xl text-xl flex items-center justify-center ${emoji === em ? "bg-accent-50 ring-2 ring-accent-500" : "bg-slate-100 hover:bg-slate-200"}`}
-              >{em}</button>
+              <button key={em} type="button" onClick={() => setEmoji(em)}
+                className={`w-10 h-10 rounded-xl text-xl flex items-center justify-center ${emoji === em ? "bg-accent-50 ring-2 ring-accent-500" : "bg-slate-100 hover:bg-slate-200"}`}>{em}</button>
             ))}
-          </div>
-        </Field>
-        <Field label={`Members (${memberIds.length} selected)`}>
-          <div className="space-y-1.5 max-h-64 overflow-y-auto">
-            {state.people.map((p) => (
-              <label key={p.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-slate-50 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={memberIds.includes(p.id)}
-                  onChange={() => toggle(p.id)}
-                  className="w-4 h-4 accent-accent-600"
-                />
-                <Avatar person={p} size={28} />
-                <span className="text-sm">{p.name}{p.id === me.id ? " (you)" : ""}</span>
-              </label>
-            ))}
-            {state.people.length < 2 && (
-              <div className="text-xs text-slate-500 p-2">Add more people on the People tab first.</div>
-            )}
           </div>
         </Field>
         {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-        <Button type="submit" className="w-full mt-2">Create group</Button>
+        <Button type="submit" className="w-full mt-2" disabled={loading}>{loading ? "Creating…" : "Create group"}</Button>
+        <p className="text-xs text-slate-400 mt-3 text-center">You'll add members on the next screen.</p>
       </form>
     </Modal>
   );
 }
 
-/* ---------------- Group Detail ---------------- */
+/* ---------------- Group detail ---------------- */
 
 function GroupDetail({ state, groupId, me, onBack }) {
   const group = state.groups.find((g) => g.id === groupId);
-  const [showAdd, setShowAdd] = useState(false);
+  const [showAddExpense, setShowAddExpense] = useState(false);
   const [showSettle, setShowSettle] = useState(false);
+  const [showAddMember, setShowAddMember] = useState(false);
 
   const expenses = useMemo(
     () => (group ? state.expenses.filter((e) => e.groupId === groupId) : []),
@@ -345,7 +364,9 @@ function GroupDetail({ state, groupId, me, onBack }) {
     );
   }
 
-  const myNet = balances[me.id] ?? 0;
+  const myMember = group.members.find((m) => m.userId === me.id);
+  const myNet = myMember ? (balances[myMember.id] ?? 0) : 0;
+  const isCreator = group.createdBy === me.id;
 
   return (
     <div className="space-y-4">
@@ -358,42 +379,78 @@ function GroupDetail({ state, groupId, me, onBack }) {
           <div className="w-12 h-12 rounded-2xl bg-accent-50 text-2xl flex items-center justify-center">{group.emoji ?? "👥"}</div>
           <div className="flex-1 min-w-0">
             <h1 className="text-xl font-bold truncate">{group.name}</h1>
-            <div className="text-xs text-slate-500">{group.memberIds.length} members · {expenses.length} entries</div>
+            <div className="text-xs text-slate-500">{group.members.length} members · {expenses.length} entries</div>
           </div>
-          <button
-            onClick={() => { if (confirm(`Delete group "${group.name}"?`)) { actions.deleteGroup(groupId); onBack(); } }}
-            className="p-2 text-slate-400 hover:text-red-500" aria-label="Delete"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-          </button>
+          {isCreator && (
+            <button
+              onClick={() => { if (confirm(`Delete group "${group.name}"?`)) { actions.deleteGroup(groupId); onBack(); } }}
+              className="p-2 text-slate-400 hover:text-red-500" aria-label="Delete">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            </button>
+          )}
         </div>
       </div>
 
-      <Card className="p-4">
-        <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Your balance here</div>
-        <div className={`text-2xl font-bold ${myNet >= 0 ? "text-accent-600" : "text-red-500"}`}>
-          {myNet >= 0 ? "+" : "-"}{fmt(myNet)}
+      {myMember && (
+        <Card className="p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Your balance here</div>
+          <div className={`text-2xl font-bold ${myNet >= 0 ? "text-accent-600" : "text-red-500"}`}>
+            {myNet >= 0 ? "+" : "-"}{fmt(myNet)}
+          </div>
+          <div className="flex gap-2 mt-3">
+            <Button onClick={() => setShowAddExpense(true)} className="flex-1">+ Add expense</Button>
+            <Button variant="ghost" onClick={() => setShowSettle(true)} disabled={settlements.length === 0}>Settle up</Button>
+          </div>
+        </Card>
+      )}
+
+      <div>
+        <div className="flex items-center justify-between mb-2 px-1">
+          <div className="text-sm font-semibold text-slate-600">Members ({group.members.length})</div>
+          <button onClick={() => setShowAddMember(true)} className="text-xs font-semibold text-accent-600">+ Add member</button>
         </div>
-        <div className="flex gap-2 mt-3">
-          <Button onClick={() => setShowAdd(true)} className="flex-1">+ Add expense</Button>
-          <Button variant="ghost" onClick={() => setShowSettle(true)} disabled={settlements.length === 0}>Settle up</Button>
-        </div>
-      </Card>
+        <Card className="divide-y divide-slate-100">
+          {group.members.map((m) => {
+            const isMe = m.userId === me.id;
+            const isContact = !m.userId;
+            return (
+              <div key={m.id} className="p-3 flex items-center gap-3">
+                <Avatar person={memberToPerson(m)} size={36} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium flex items-center gap-2">
+                    <span className="truncate">{m.displayName}</span>
+                    {isMe && <span className="text-xs text-accent-600 font-semibold">you</span>}
+                    {isContact && <Badge>contact</Badge>}
+                    {!isContact && !isMe && <Badge tone="green">user</Badge>}
+                  </div>
+                </div>
+                {!isMe && (
+                  <button
+                    onClick={() => { if (confirm(`Remove ${m.displayName} from the group?`)) actions.removeMember(m.id); }}
+                    className="p-2 text-slate-400 hover:text-red-500" aria-label="Remove">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </Card>
+      </div>
 
       {settlements.length > 0 && (
         <div>
           <div className="text-sm font-semibold text-slate-600 mb-2 px-1">Who owes whom</div>
           <Card className="divide-y divide-slate-100">
             {settlements.map((t, i) => {
-              const from = state.people.find((p) => p.id === t.from);
-              const to = state.people.find((p) => p.id === t.to);
+              const from = group.members.find((m) => m.id === t.from);
+              const to = group.members.find((m) => m.id === t.to);
               return (
                 <div key={i} className="p-3 flex items-center gap-2 text-sm">
-                  <Avatar person={from} size={28} />
-                  <span className="font-medium">{from?.name}</span>
+                  <Avatar person={memberToPerson(from)} size={28} />
+                  <span className="font-medium">{from?.displayName}</span>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-slate-400"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-                  <Avatar person={to} size={28} />
-                  <span className="font-medium">{to?.name}</span>
+                  <Avatar person={memberToPerson(to)} size={28} />
+                  <span className="font-medium">{to?.displayName}</span>
                   <span className="ml-auto font-bold text-ink">{fmt(t.amount)}</span>
                 </div>
               );
@@ -405,35 +462,38 @@ function GroupDetail({ state, groupId, me, onBack }) {
       <div>
         <div className="text-sm font-semibold text-slate-600 mb-2 px-1">Activity</div>
         {expenses.length === 0 ? (
-          <EmptyState icon="📝" title="No expenses yet" subtitle="Add your first expense to get started." />
+          <EmptyState icon="📝" title="No expenses yet" subtitle="Add the first expense to get started." />
         ) : (
           <Card className="divide-y divide-slate-100">
-            {expenses.map((e) => <ExpenseRow key={e.id} expense={e} state={state} me={me} />)}
+            {expenses.map((e) => <ExpenseRow key={e.id} expense={e} group={group} me={me} />)}
           </Card>
         )}
       </div>
 
-      <AddExpenseModal open={showAdd} onClose={() => setShowAdd(false)} group={group} state={state} me={me} />
-      <SettleUpModal open={showSettle} onClose={() => setShowSettle(false)} settlements={settlements} state={state} groupId={groupId} />
+      <AddExpenseModal open={showAddExpense} onClose={() => setShowAddExpense(false)} group={group} me={me} />
+      <SettleUpModal open={showSettle} onClose={() => setShowSettle(false)} settlements={settlements} group={group} groupId={groupId} />
+      <AddMemberModal open={showAddMember} onClose={() => setShowAddMember(false)} group={group} />
     </div>
   );
 }
 
-function ExpenseRow({ expense, state, me }) {
-  const payer = state.people.find((p) => p.id === expense.paidBy);
-  const isMe = expense.paidBy === me.id;
-  const myShare = expense.splitBetween.includes(me.id) ? expense.amount / expense.splitBetween.length : 0;
+function ExpenseRow({ expense, group, me }) {
+  const payer = group.members.find((m) => m.id === expense.paidBy);
+  const myMember = group.members.find((m) => m.userId === me.id);
+  const isMe = myMember && expense.paidBy === myMember.id;
+  const myShare = myMember && expense.splitBetween.includes(myMember.id)
+    ? expense.amount / expense.splitBetween.length : 0;
   const myImpact = isMe ? expense.amount - myShare : -myShare;
 
   if (expense.type === "settlement") {
-    const to = state.people.find((p) => p.id === expense.splitBetween[0]);
+    const to = group.members.find((m) => m.id === expense.splitBetween[0]);
     return (
       <div className="p-3 flex items-center gap-3">
         <div className="w-9 h-9 rounded-full bg-accent-50 flex items-center justify-center text-accent-600 shrink-0">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 6L9 17l-5-5"/></svg>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-sm"><span className="font-semibold">{payer?.name}</span> paid <span className="font-semibold">{to?.name}</span></div>
+          <div className="text-sm"><span className="font-semibold">{payer?.displayName}</span> paid <span className="font-semibold">{to?.displayName}</span></div>
           <div className="text-xs text-slate-500">{new Date(expense.date).toLocaleDateString()}</div>
         </div>
         <div className="text-sm font-bold text-accent-600">{fmt(expense.amount)}</div>
@@ -441,44 +501,49 @@ function ExpenseRow({ expense, state, me }) {
     );
   }
 
+  const canDelete = expense.createdBy === me.id;
   return (
     <div className="p-3 flex items-center gap-3">
-      <Avatar person={payer} size={36} />
+      <Avatar person={memberToPerson(payer)} size={36} />
       <div className="flex-1 min-w-0">
         <div className="text-sm font-medium truncate">{expense.description}</div>
         <div className="text-xs text-slate-500">
-          {isMe ? "You" : payer?.name ?? "—"} paid {fmt(expense.amount)} · split {expense.splitBetween.length} ways
+          {isMe ? "You" : payer?.displayName ?? "—"} paid {fmt(expense.amount)} · split {expense.splitBetween.length} ways
         </div>
       </div>
       <div className="text-right">
-        <div className={`text-sm font-bold ${myImpact >= 0 ? "text-accent-600" : "text-red-500"}`}>
-          {myImpact >= 0 ? "+" : "-"}{fmt(myImpact)}
-        </div>
-        <button
-          onClick={() => { if (confirm("Delete this expense?")) actions.deleteExpense(expense.id); }}
-          className="text-[10px] text-slate-400 hover:text-red-500"
-        >delete</button>
+        {myMember && (
+          <div className={`text-sm font-bold ${myImpact >= 0 ? "text-accent-600" : "text-red-500"}`}>
+            {myImpact >= 0 ? "+" : "-"}{fmt(myImpact)}
+          </div>
+        )}
+        {canDelete && (
+          <button
+            onClick={() => { if (confirm("Delete this expense?")) actions.deleteExpense(expense.id); }}
+            className="text-[10px] text-slate-400 hover:text-red-500">delete</button>
+        )}
       </div>
     </div>
   );
 }
 
-function AddExpenseModal({ open, onClose, group, state, me }) {
+function AddExpenseModal({ open, onClose, group, me }) {
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
-  const [paidBy, setPaidBy] = useState(me.id);
+  const [paidBy, setPaidBy] = useState("");
   const [splitBetween, setSplitBetween] = useState([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (open) {
+    if (open && group) {
+      const myMember = group.members.find((m) => m.userId === me.id);
       setDescription("");
       setAmount("");
-      setPaidBy(me.id);
-      setSplitBetween(group?.memberIds ?? []);
+      setPaidBy(myMember?.id ?? group.members[0]?.id ?? "");
+      setSplitBetween(group.members.map((m) => m.id));
       setError("");
     }
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, group, me]);
 
   if (!group) return null;
 
@@ -488,15 +553,15 @@ function AddExpenseModal({ open, onClose, group, state, me }) {
     const amt = parseFloat(amount);
     if (!(amt > 0)) return setError("Enter a valid amount");
     if (splitBetween.length === 0) return setError("Pick at least one person to split with");
+    if (!paidBy) return setError("Pick who paid");
     actions.addExpense({ groupId: group.id, description, amount: amt, paidBy, splitBetween });
     onClose();
   };
 
-  const members = state.people.filter((p) => group.memberIds.includes(p.id));
-  const toggleSplit = (id) =>
+  const toggle = (id) =>
     setSplitBetween((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-  const perHead =
-    parseFloat(amount) > 0 && splitBetween.length > 0 ? parseFloat(amount) / splitBetween.length : 0;
+  const perHead = parseFloat(amount) > 0 && splitBetween.length > 0
+    ? parseFloat(amount) / splitBetween.length : 0;
 
   return (
     <Modal open={open} onClose={onClose} title="Add expense">
@@ -508,29 +573,24 @@ function AddExpenseModal({ open, onClose, group, state, me }) {
           <Input type="number" inputMode="decimal" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
         </Field>
         <Field label="Paid by">
-          <select
-            value={paidBy}
-            onChange={(e) => setPaidBy(e.target.value)}
-            className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-accent-500 bg-white"
-          >
-            {members.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}{p.id === me.id ? " (you)" : ""}</option>
+          <select value={paidBy} onChange={(e) => setPaidBy(e.target.value)}
+            className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-accent-500 bg-white">
+            {group.members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.displayName}{m.userId === me.id ? " (you)" : ""}{!m.userId ? " (contact)" : ""}
+              </option>
             ))}
           </select>
         </Field>
         <Field label={`Split equally between (${splitBetween.length})`}>
           <div className="space-y-1.5 max-h-56 overflow-y-auto">
-            {members.map((p) => (
-              <label key={p.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-slate-50 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={splitBetween.includes(p.id)}
-                  onChange={() => toggleSplit(p.id)}
-                  className="w-4 h-4 accent-accent-600"
-                />
-                <Avatar person={p} size={28} />
-                <span className="text-sm flex-1">{p.name}</span>
-                {splitBetween.includes(p.id) && perHead > 0 && (
+            {group.members.map((m) => (
+              <label key={m.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-slate-50 cursor-pointer">
+                <input type="checkbox" checked={splitBetween.includes(m.id)} onChange={() => toggle(m.id)}
+                  className="w-4 h-4 accent-accent-600" />
+                <Avatar person={memberToPerson(m)} size={28} />
+                <span className="text-sm flex-1">{m.displayName}{m.userId === me.id ? " (you)" : ""}</span>
+                {splitBetween.includes(m.id) && perHead > 0 && (
                   <span className="text-xs text-slate-500">{fmt(perHead)}</span>
                 )}
               </label>
@@ -544,7 +604,7 @@ function AddExpenseModal({ open, onClose, group, state, me }) {
   );
 }
 
-function SettleUpModal({ open, onClose, settlements, state, groupId }) {
+function SettleUpModal({ open, onClose, settlements, group, groupId }) {
   return (
     <Modal open={open} onClose={onClose} title="Settle up">
       {settlements.length === 0 ? (
@@ -552,20 +612,18 @@ function SettleUpModal({ open, onClose, settlements, state, groupId }) {
       ) : (
         <div className="space-y-2">
           {settlements.map((t, i) => {
-            const from = state.people.find((p) => p.id === t.from);
-            const to = state.people.find((p) => p.id === t.to);
+            const from = group.members.find((m) => m.id === t.from);
+            const to = group.members.find((m) => m.id === t.to);
             return (
               <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                <Avatar person={from} size={32} />
+                <Avatar person={memberToPerson(from)} size={32} />
                 <div className="text-sm flex-1">
-                  <span className="font-semibold">{from?.name}</span> → <span className="font-semibold">{to?.name}</span>
+                  <span className="font-semibold">{from?.displayName}</span> → <span className="font-semibold">{to?.displayName}</span>
                   <div className="text-xs text-slate-500">{fmt(t.amount)}</div>
                 </div>
-                <Button
-                  variant="ghost"
+                <Button variant="ghost"
                   onClick={() => actions.settleUp({ groupId, fromId: t.from, toId: t.to, amount: t.amount })}
-                  className="text-xs px-3 py-1.5"
-                >Mark paid</Button>
+                  className="text-xs px-3 py-1.5">Mark paid</Button>
               </div>
             );
           })}
@@ -575,99 +633,128 @@ function SettleUpModal({ open, onClose, settlements, state, groupId }) {
   );
 }
 
-/* ---------------- People ---------------- */
+/* ---------------- Add member modal (registered user OR contact) ---------------- */
 
-function People({ state, me }) {
-  const [name, setName] = useState("");
+function AddMemberModal({ open, onClose, group }) {
+  const [tab, setTab] = useState("registered");
+  const [email, setEmail] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [foundUser, setFoundUser] = useState(null);
+  const [contactName, setContactName] = useState("");
   const [error, setError] = useState("");
-  const [editingId, setEditingId] = useState(null);
-  const [editName, setEditName] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const add = (e) => {
+  useEffect(() => {
+    if (open) {
+      setTab("registered");
+      setEmail(""); setFoundUser(null); setContactName(""); setError(""); setLoading(false);
+    }
+  }, [open]);
+
+  const search = async (e) => {
     e.preventDefault();
     setError("");
-    const n = name.trim();
-    if (!n) return setError("Name is required");
-    if (state.people.some((p) => p.name.toLowerCase() === n.toLowerCase())) {
-      return setError("Someone already has that name");
-    }
-    actions.addPerson(n);
-    setName("");
+    setFoundUser(null);
+    if (!email.trim()) return setError("Enter an email");
+    setSearching(true);
+    const profile = await actions.findUserByEmail(email);
+    setSearching(false);
+    if (!profile) return setError("No registered user with that email");
+    if (group.members.some((m) => m.userId === profile.id))
+      return setError(`${profile.displayName} is already in this group`);
+    setFoundUser(profile);
   };
 
-  const startEdit = (p) => { setEditingId(p.id); setEditName(p.name); };
-  const saveEdit = () => {
-    if (editName.trim()) actions.updatePerson(editingId, editName);
-    setEditingId(null);
+  const addRegistered = async () => {
+    if (!foundUser) return;
+    setLoading(true);
+    try {
+      await actions.addRegisteredMember(group.id, foundUser.id, foundUser);
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addContact = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!contactName.trim()) return setError("Name is required");
+    setLoading(true);
+    try {
+      await actions.addContactMember(group.id, contactName);
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold tracking-tight pt-2">People</h1>
-
-      <Card className="p-4">
-        <form onSubmit={add} className="flex gap-2">
-          <Input value={name} onChange={(e) => { setName(e.target.value); setError(""); }} placeholder="Add a person..." />
-          <Button type="submit">Add</Button>
-        </form>
-        {error && <div className="text-sm text-red-600 mt-2">{error}</div>}
-        <div className="text-xs text-slate-400 mt-2">
-          People you add here don't have an account — they're just contacts to split with. They can sign up separately.
-        </div>
-      </Card>
-
-      <Card className="divide-y divide-slate-100">
-        {state.people.map((p) => {
-          const hasAccount = p.isSelf;
-          return (
-            <div key={p.id} className="p-3 flex items-center gap-3">
-              <Avatar person={p} size={40} />
-              {editingId === p.id ? (
-                <>
-                  <Input
-                    autoFocus
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && saveEdit()}
-                    className="flex-1"
-                  />
-                  <Button onClick={saveEdit} className="text-xs px-3 py-1.5">Save</Button>
-                  <Button variant="ghost" onClick={() => setEditingId(null)} className="text-xs px-3 py-1.5">Cancel</Button>
-                </>
-              ) : (
-                <>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium flex items-center gap-2">
-                      <span className="truncate">{p.name}</span>
-                      {p.id === me.id && <span className="text-xs text-accent-600 font-semibold">you</span>}
-                      {hasAccount && p.id !== me.id && <Badge tone="green">account</Badge>}
-                    </div>
-                  </div>
-                  <button onClick={() => startEdit(p)} className="p-2 text-slate-400 hover:text-ink" aria-label="Edit">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-                  </button>
-                  {!hasAccount && (
-                    <button
-                      onClick={() => { if (confirm(`Remove ${p.name}?`)) actions.deletePerson(p.id); }}
-                      className="p-2 text-slate-400 hover:text-red-500" aria-label="Delete"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
-      </Card>
-
-      <div className="text-center pt-4">
-        <button
-          onClick={() => { if (confirm("Reset all data? This wipes everything including your account.")) actions.resetAll(); }}
-          className="text-xs text-slate-400 hover:text-red-500"
-        >Reset all data</button>
+    <Modal open={open} onClose={onClose} title="Add member">
+      <div className="flex bg-slate-100 rounded-xl p-1 mb-4 text-sm font-semibold">
+        <button type="button" onClick={() => setTab("registered")}
+          className={`flex-1 py-1.5 rounded-lg ${tab === "registered" ? "bg-white shadow-sm text-ink" : "text-slate-500"}`}>
+          Registered user
+        </button>
+        <button type="button" onClick={() => setTab("contact")}
+          className={`flex-1 py-1.5 rounded-lg ${tab === "contact" ? "bg-white shadow-sm text-ink" : "text-slate-500"}`}>
+          Contact
+        </button>
       </div>
-    </div>
+
+      {tab === "registered" ? (
+        <>
+          <form onSubmit={search}>
+            <Field label="Email">
+              <Input autoFocus type="email" autoCapitalize="none" autoCorrect="off"
+                value={email} onChange={(e) => { setEmail(e.target.value); setFoundUser(null); }}
+                placeholder="user@example.com" />
+            </Field>
+            <Button type="submit" variant="ghost" className="w-full" disabled={searching}>
+              {searching ? "Searching…" : "Find user"}
+            </Button>
+          </form>
+
+          {foundUser && (
+            <div className="mt-4 p-3 bg-accent-50 rounded-xl flex items-center gap-3">
+              <Avatar person={{ id: foundUser.id, name: foundUser.displayName, color: foundUser.color }} size={36} />
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-sm truncate">{foundUser.displayName}</div>
+                <div className="text-xs text-slate-500 truncate">{foundUser.email}</div>
+              </div>
+              <Button onClick={addRegistered} disabled={loading} className="text-xs px-3 py-1.5">
+                {loading ? "Adding…" : "Add"}
+              </Button>
+            </div>
+          )}
+
+          {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
+
+          <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
+            Only users who have signed up to Splitly can be added this way.<br />
+            They'll see this group and can add expenses themselves.
+          </p>
+        </>
+      ) : (
+        <form onSubmit={addContact}>
+          <Field label="Contact name">
+            <Input autoFocus value={contactName} onChange={(e) => setContactName(e.target.value)}
+              placeholder="e.g. Dad, Roommate, Bob" />
+          </Field>
+          {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+          <Button type="submit" className="w-full" disabled={loading}>
+            {loading ? "Adding…" : "Add contact"}
+          </Button>
+          <p className="text-xs text-slate-400 mt-4 text-center leading-relaxed">
+            Contacts don't have an account — they're just a name to track splits with.
+          </p>
+        </form>
+      )}
+    </Modal>
   );
 }
 
@@ -676,7 +763,7 @@ function People({ state, me }) {
 function History({ state }) {
   const [filter, setFilter] = useState("all");
 
-  const groups = useMemo(() => {
+  const groupsByDay = useMemo(() => {
     const filtered = filter === "all"
       ? state.events
       : state.events.filter((e) => filterMap[filter].includes(e.type));
@@ -692,7 +779,7 @@ function History({ state }) {
     <div className="space-y-3">
       <div className="pt-2">
         <h1 className="text-2xl font-bold tracking-tight">History</h1>
-        <p className="text-xs text-slate-500 mt-0.5">Every change, with who and when.</p>
+        <p className="text-xs text-slate-500 mt-0.5">Every change in groups you're in.</p>
       </div>
 
       <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
@@ -701,36 +788,31 @@ function History({ state }) {
           { id: "expenses", label: "Expenses" },
           { id: "settlements", label: "Settlements" },
           { id: "groups", label: "Groups" },
-          { id: "people", label: "People" },
-          { id: "auth", label: "Auth" },
+          { id: "members", label: "Members" },
         ].map((f) => (
-          <button
-            key={f.id}
-            onClick={() => setFilter(f.id)}
-            className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap ${filter === f.id ? "bg-ink text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-          >{f.label}</button>
+          <button key={f.id} onClick={() => setFilter(f.id)}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap ${filter === f.id ? "bg-ink text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+            {f.label}
+          </button>
         ))}
       </div>
 
-      {groups.length === 0 ? (
+      {groupsByDay.length === 0 ? (
         <EmptyState icon="📜" title="No history yet" subtitle="Activity will appear here as you use the app." />
       ) : (
-        groups.map(([day, evs]) => (
+        groupsByDay.map(([day, evs]) => (
           <div key={day}>
-            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide px-1 mb-1.5">
-              {dayLabel(day)}
-            </div>
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide px-1 mb-1.5">{dayLabel(day)}</div>
             <Card className="divide-y divide-slate-100">
               {evs.map((ev) => {
-                // In single-tenant mode, the actor is always the owner (you)
-                const actorPerson = state.people.find((p) => p.isSelf);
+                const group = state.groups.find((g) => g.id === ev.groupId);
                 return (
                   <div key={ev.id} className="p-3 flex items-start gap-3">
                     <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0">{eventIcon(ev.type)}</div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm">{ev.label}</div>
                       <div className="text-xs text-slate-400 mt-0.5">
-                        {actorPerson?.name ?? "system"} · {new Date(ev.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        {group?.name ? `${group.name} · ` : ""}{new Date(ev.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </div>
                     </div>
                   </div>
@@ -748,8 +830,7 @@ const filterMap = {
   expenses: ["expense_added", "expense_deleted"],
   settlements: ["settlement_added"],
   groups: ["group_created", "group_deleted"],
-  people: ["person_added", "person_renamed", "person_deleted"],
-  auth: ["account_created", "signed_in", "signed_out"],
+  members: ["member_added", "member_removed"],
 };
 
 function dayLabel(day) {
@@ -763,9 +844,8 @@ function dayLabel(day) {
 
 /* ---------------- Notifications ---------------- */
 
-function Notifications({ state, me, onBack, onOpenGroup }) {
-  const myNotifs = state.notifications.filter((n) => n.toPersonId === me.id);
-  const hasUnread = myNotifs.some((n) => !n.read);
+function Notifications({ state, onBack, onOpenGroup }) {
+  const hasUnread = state.notifications.some((n) => !n.read);
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between pt-2">
@@ -777,19 +857,17 @@ function Notifications({ state, me, onBack, onOpenGroup }) {
           <h1 className="text-2xl font-bold tracking-tight">Notifications</h1>
         </div>
         {hasUnread && (
-          <Button variant="ghost" onClick={() => actions.markNotificationsRead(me.id)} className="text-xs px-3 py-1.5">Mark all read</Button>
+          <Button variant="ghost" onClick={() => actions.markNotificationsRead()} className="text-xs px-3 py-1.5">Mark all read</Button>
         )}
       </div>
-      {myNotifs.length === 0 ? (
-        <EmptyState icon="🔔" title="All quiet" subtitle="You'll be notified when someone adds an expense involving you." />
+      {state.notifications.length === 0 ? (
+        <EmptyState icon="🔔" title="All quiet" subtitle="You'll be notified when someone adds you to a group or splits an expense involving you." />
       ) : (
         <Card className="divide-y divide-slate-100">
-          {myNotifs.map((n) => (
-            <button
-              key={n.id}
+          {state.notifications.map((n) => (
+            <button key={n.id}
               onClick={() => n.groupId && onOpenGroup(n.groupId)}
-              className={`w-full text-left p-3 flex items-start gap-3 hover:bg-slate-50 ${!n.read ? "bg-accent-50/40" : ""}`}
-            >
+              className={`w-full text-left p-3 flex items-start gap-3 hover:bg-slate-50 ${!n.read ? "bg-accent-50/40" : ""}`}>
               <div className={`w-2 h-2 rounded-full mt-2 shrink-0 ${!n.read ? "bg-accent-500" : "bg-slate-300"}`} />
               <div className="flex-1 min-w-0">
                 <div className="text-sm">{n.message}</div>
@@ -816,36 +894,20 @@ function timeAgo(ts) {
 function BottomNav({ view, setView }) {
   const tabs = [
     { id: "home", label: "Home", icon: <path d="M3 12l9-9 9 9M5 10v10h14V10" /> },
-    {
-      id: "groups", label: "Groups",
-      icon: (
-        <>
-          <circle cx="9" cy="8" r="4"/>
-          <path d="M17 11a3 3 0 1 0 0-6"/>
-          <path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/>
-          <path d="M21 21v-2a4 4 0 0 0-3-3.87"/>
-        </>
-      ),
-    },
-    {
-      id: "history", label: "History",
-      icon: (
-        <>
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M12 6v6l4 2"/>
-        </>
-      ),
-    },
-    {
-      id: "people", label: "People",
-      icon: (
-        <>
-          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
-        </>
-      ),
-    },
+    { id: "groups", label: "Groups", icon: (
+      <>
+        <circle cx="9" cy="8" r="4"/>
+        <path d="M17 11a3 3 0 1 0 0-6"/>
+        <path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/>
+        <path d="M21 21v-2a4 4 0 0 0-3-3.87"/>
+      </>
+    ) },
+    { id: "history", label: "History", icon: (
+      <>
+        <circle cx="12" cy="12" r="10"/>
+        <path d="M12 6v6l4 2"/>
+      </>
+    ) },
   ];
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-30 max-w-md mx-auto">
@@ -853,11 +915,8 @@ function BottomNav({ view, setView }) {
         {tabs.map((t) => {
           const active = view.name === t.id || (t.id === "groups" && view.name === "group");
           return (
-            <button
-              key={t.id}
-              onClick={() => setView({ name: t.id })}
-              className={`flex-1 flex flex-col items-center gap-0.5 py-2.5 ${active ? "text-accent-600" : "text-slate-400"}`}
-            >
+            <button key={t.id} onClick={() => setView({ name: t.id })}
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2.5 ${active ? "text-accent-600" : "text-slate-400"}`}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 {t.icon}
               </svg>
@@ -892,17 +951,8 @@ function SetupError({ message }) {
       <div className="bg-red-50 border border-red-200 rounded-2xl p-5">
         <div className="font-semibold text-red-700 mb-1">Something went wrong</div>
         <div className="text-sm text-red-600 mb-3">{message}</div>
-        <div className="text-xs text-slate-600 leading-relaxed">
-          This usually means the database schema hasn't been applied yet, or the new-user trigger didn't run.
-          <ol className="list-decimal pl-5 mt-2 space-y-1">
-            <li>In Supabase → SQL Editor, run the contents of <code>supabase/schema.sql</code>.</li>
-            <li>Sign out and sign in again.</li>
-          </ol>
-        </div>
-        <button
-          onClick={() => auth.signOut()}
-          className="mt-4 text-sm font-semibold text-accent-600 hover:text-accent-700"
-        >Sign out</button>
+        <button onClick={() => auth.signOut()}
+          className="mt-2 text-sm font-semibold text-accent-600 hover:text-accent-700">Sign out</button>
       </div>
     </div>
   );

@@ -2,29 +2,35 @@ import { useEffect, useState } from "react";
 import { supabase } from "./supabase";
 
 /* =========================================================
- * STORE — Supabase-backed, with the same API as the local
- * version so App.jsx and components don't have to change.
+ * STORE — hybrid multi-tenant.
+ * - Each registered user has a public `profile` (id = auth.uid).
+ * - Groups are owned by their creator but shared among members.
+ * - A "member" of a group is either:
+ *     • a registered user (m.userId set) — can see + edit the group
+ *     • a contact (m.userId null) — just a name for split tracking
+ * - Expenses/splits reference member IDs (per-group identity).
+ * - Notifications and balances aggregate across groups for registered users.
  *
  * Exposed API:
- *   useStore()                    → current denormalized state
- *   actions.{addPerson, updatePerson, deletePerson,
- *            addGroup, deleteGroup,
- *            addExpense, deleteExpense,
- *            settleUp,
- *            markNotificationsRead,
- *            resetAll}
- *   auth.{signUp, signIn, signOut}
- *   currentPerson(state) / currentUser(state)
- *   groupBalances / simplifyDebts / userTotalsAcrossGroups /
- *   userGroupNet / fmt / eventIcon / uid
+ *   useStore()                            → denormalized state
+ *   actions.{ addGroup, deleteGroup,
+ *             addRegisteredMember, addContactMember, removeMember,
+ *             addExpense, deleteExpense,
+ *             settleUp,
+ *             updateProfile,
+ *             markNotificationsRead,
+ *             findUserByEmail }
+ *   auth.{ signUp, signIn, signOut }
+ *   selectors: currentProfile, myMemberInGroup,
+ *              groupBalances, simplifyDebts,
+ *              userTotalsAcrossGroups, userGroupNet
  * ========================================================= */
 
 let _state = {
   session: null,
-  profile: null,
-  people: [],
-  groups: [],
-  expenses: [],
+  profile: null,        // own profile {id, email, displayName, color}
+  groups: [],           // [{id, name, emoji, createdBy, members: [...]}]
+  expenses: [],         // [{id, groupId, description, amount, paidBy, splitBetween, type, date, createdBy}]
   events: [],
   notifications: [],
   loading: true,
@@ -38,9 +44,9 @@ function setState(updater) {
 }
 
 export function useStore() {
-  const [, setLocal] = useState(0);
+  const [, bump] = useState(0);
   useEffect(() => {
-    const sub = () => setLocal((n) => n + 1);
+    const sub = () => bump((n) => n + 1);
     _subs.add(sub);
     return () => _subs.delete(sub);
   }, []);
@@ -53,11 +59,14 @@ export function uid() {
 
 /* ---------- Selectors ---------- */
 
-export function currentUser(state) {
-  return state.session?.user ?? null;
+export function currentProfile(state) {
+  return state.profile;
 }
-export function currentPerson(state) {
-  return state.people.find((p) => p.isSelf) ?? null;
+export function myMemberInGroup(state, groupId) {
+  if (!state.profile) return null;
+  const g = state.groups.find((x) => x.id === groupId);
+  if (!g) return null;
+  return g.members.find((m) => m.userId === state.profile.id) ?? null;
 }
 
 /* ---------- Auth ---------- */
@@ -68,20 +77,13 @@ export const auth = {
     if (!email) throw new Error("Email is required");
     if (password.length < 6) throw new Error("Password must be at least 6 characters");
     if (!displayName?.trim()) throw new Error("Display name is required");
-
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        data: { display_name: displayName.trim() },
-      },
+      options: { data: { display_name: displayName.trim() } },
     });
     if (error) throw error;
-    if (!data.session) {
-      throw new Error(
-        "Account created — check your email to confirm. (Tip: turn off 'Confirm email' in Supabase → Auth settings to skip this for testing.)"
-      );
-    }
+    if (!data.session) throw new Error("Account created — check your email to confirm.");
   },
 
   async signIn({ email, password }) {
@@ -95,36 +97,54 @@ export const auth = {
   },
 };
 
-/* ---------- Initial load + auth wiring ---------- */
+/* ---------- Loading ---------- */
 
 async function loadAll(userId) {
   setState((s) => ({ ...s, loading: true, error: null }));
   try {
-    const [profile, people, groups, groupMembers, expenses, expenseSplits, events, notifications] =
-      await Promise.all([
-        supabase.from("profiles").select("*").eq("id", userId).maybeSingle(),
-        supabase.from("people").select("*").eq("owner_id", userId).order("created_at", { ascending: true }),
-        supabase.from("groups").select("*").eq("owner_id", userId).order("created_at", { ascending: false }),
-        supabase.from("group_members").select("*"),
-        supabase.from("expenses").select("*").eq("owner_id", userId).order("date", { ascending: false }),
-        supabase.from("expense_splits").select("*"),
-        supabase.from("events").select("*").eq("owner_id", userId).order("ts", { ascending: false }).limit(500),
-        supabase.from("notifications").select("*").eq("owner_id", userId).order("ts", { ascending: false }).limit(200),
-      ]);
+    // Step 1: profile + groups (RLS filters to groups I'm a member of)
+    const [profileRes, groupsRes] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", userId).maybeSingle(),
+      supabase.from("groups").select("*").order("created_at", { ascending: false }),
+    ]);
+    if (profileRes.error) throw profileRes.error;
+    if (groupsRes.error) throw groupsRes.error;
 
-    const errs = [profile, people, groups, groupMembers, expenses, expenseSplits, events, notifications]
-      .map((r) => r.error)
-      .filter(Boolean);
-    if (errs.length) throw errs[0];
+    const groupRows = groupsRes.data ?? [];
+    const groupIds = groupRows.map((g) => g.id);
+
+    // Step 2: members + expenses + splits + events for visible groups
+    const [membersRes, expensesRes, splitsRes, eventsRes, notifRes] = await Promise.all([
+      groupIds.length
+        ? supabase.from("group_members").select("*").in("group_id", groupIds)
+        : Promise.resolve({ data: [], error: null }),
+      groupIds.length
+        ? supabase.from("expenses").select("*").in("group_id", groupIds).order("date", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
+      Promise.resolve({ data: [], error: null }), // filled below after expense IDs known
+      groupIds.length
+        ? supabase.from("events").select("*").in("group_id", groupIds).order("ts", { ascending: false }).limit(500)
+        : Promise.resolve({ data: [], error: null }),
+      supabase.from("notifications").select("*").eq("user_id", userId).order("ts", { ascending: false }).limit(200),
+    ]);
+    if (membersRes.error) throw membersRes.error;
+    if (expensesRes.error) throw expensesRes.error;
+    if (eventsRes.error) throw eventsRes.error;
+    if (notifRes.error) throw notifRes.error;
+
+    const expenseIds = (expensesRes.data ?? []).map((e) => e.id);
+    const splitsLoad = expenseIds.length
+      ? await supabase.from("expense_splits").select("*").in("expense_id", expenseIds)
+      : { data: [], error: null };
+    if (splitsLoad.error) throw splitsLoad.error;
 
     setState((s) => ({
       ...s,
-      profile: profile.data ? mapProfile(profile.data) : null,
-      people: (people.data ?? []).map(mapPerson),
-      groups: (groups.data ?? []).map((g) => mapGroup(g, groupMembers.data ?? [])),
-      expenses: (expenses.data ?? []).map((e) => mapExpense(e, expenseSplits.data ?? [])),
-      events: (events.data ?? []).map(mapEvent),
-      notifications: (notifications.data ?? []).map(mapNotification),
+      profile: profileRes.data ? mapProfile(profileRes.data) : null,
+      groups: groupRows.map((g) => mapGroup(g, membersRes.data ?? [])),
+      expenses: (expensesRes.data ?? []).map((e) => mapExpense(e, splitsLoad.data ?? [])),
+      events: (eventsRes.data ?? []).map(mapEvent),
+      notifications: (notifRes.data ?? []).map(mapNotification),
       loading: false,
       error: null,
     }));
@@ -138,7 +158,6 @@ function clearData() {
   setState((s) => ({
     ...s,
     profile: null,
-    people: [],
     groups: [],
     expenses: [],
     events: [],
@@ -148,207 +167,290 @@ function clearData() {
   }));
 }
 
-// Initial session check + auth listener
 supabase.auth.getSession().then(({ data: { session } }) => {
   setState((s) => ({ ...s, session }));
   if (session?.user) loadAll(session.user.id);
   else setState((s) => ({ ...s, loading: false }));
 });
 
-supabase.auth.onAuthStateChange((event, session) => {
+supabase.auth.onAuthStateChange((_event, session) => {
   setState((s) => ({ ...s, session }));
   if (session?.user) loadAll(session.user.id);
   else clearData();
 });
 
-/* ---------- Mapping helpers (snake_case → camelCase) ---------- */
+/* ---------- Mapping ---------- */
 
-function mapProfile(row) {
-  return { id: row.id, displayName: row.display_name, color: row.color };
+function mapProfile(r) {
+  return { id: r.id, email: r.email, displayName: r.display_name, color: r.color };
 }
-function mapPerson(row) {
-  return { id: row.id, name: row.name, color: row.color, isSelf: row.is_self };
-}
-function mapGroup(row, members) {
+function mapMember(r) {
   return {
-    id: row.id,
-    name: row.name,
-    emoji: row.emoji ?? "👥",
-    memberIds: members.filter((m) => m.group_id === row.id).map((m) => m.person_id),
+    id: r.id,
+    groupId: r.group_id,
+    userId: r.user_id,         // null for contacts
+    displayName: r.display_name,
+    color: r.color,
+    addedBy: r.added_by,
   };
 }
-function mapExpense(row, splits) {
+function mapGroup(r, members) {
   return {
-    id: row.id,
-    groupId: row.group_id,
-    description: row.description,
-    amount: parseFloat(row.amount),
-    paidBy: row.paid_by,
-    splitBetween: splits.filter((s) => s.expense_id === row.id).map((s) => s.person_id),
-    date: row.date,
-    type: row.type,
+    id: r.id,
+    name: r.name,
+    emoji: r.emoji ?? "👥",
+    createdBy: r.created_by,
+    members: members.filter((m) => m.group_id === r.id).map(mapMember),
   };
 }
-function mapEvent(row) {
+function mapExpense(r, splits) {
   return {
-    id: row.id,
-    type: row.type,
-    label: row.label,
-    ts: new Date(row.ts).getTime(),
-    actorId: row.actor_id,
-    payload: row.payload ?? {},
+    id: r.id,
+    groupId: r.group_id,
+    description: r.description,
+    amount: parseFloat(r.amount),
+    paidBy: r.paid_by_member_id,
+    splitBetween: splits.filter((s) => s.expense_id === r.id).map((s) => s.member_id),
+    type: r.type,
+    createdBy: r.created_by,
+    date: r.date,
   };
 }
-function mapNotification(row) {
+function mapEvent(r) {
   return {
-    id: row.id,
-    toPersonId: row.to_person_id,
-    message: row.message,
-    read: row.read,
-    ts: new Date(row.ts).getTime(),
-    groupId: row.group_id,
+    id: r.id,
+    groupId: r.group_id,
+    type: r.type,
+    label: r.label,
+    actorId: r.actor_id,
+    payload: r.payload ?? {},
+    ts: new Date(r.ts).getTime(),
+  };
+}
+function mapNotification(r) {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    message: r.message,
+    read: r.read,
+    groupId: r.group_id,
+    ts: new Date(r.ts).getTime(),
   };
 }
 
-/* ---------- Internal helpers ---------- */
+/* ---------- Helpers ---------- */
 
 function userId() {
   return _state.session?.user?.id;
 }
-async function logEvent(type, label, payload = {}) {
-  const uid = userId();
-  if (!uid) return;
+async function logEvent(groupId, type, label, payload = {}) {
+  const uidv = userId();
+  if (!uidv) return;
   await supabase.from("events").insert({
-    owner_id: uid,
+    group_id: groupId,
     type,
-    actor_id: uid,
+    actor_id: uidv,
     label,
     payload,
   });
 }
-
-const PALETTE = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#6366f1","#84cc16"];
-function nextColor() {
-  return PALETTE[_state.people.length % PALETTE.length];
+async function refresh() {
+  const u = userId();
+  if (u) await loadAll(u);
 }
 
-function refresh() {
-  const uid = userId();
-  if (uid) return loadAll(uid);
+const PALETTE = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#6366f1","#84cc16"];
+function pickColor(seed = 0) {
+  return PALETTE[seed % PALETTE.length];
 }
 
 /* ---------- Domain actions ---------- */
 
 export const actions = {
-  async addPerson(name) {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    if (_state.people.some((p) => p.name.toLowerCase() === trimmed.toLowerCase())) return;
-    const me = currentPerson(_state);
-    const { error } = await supabase.from("people").insert({
-      owner_id: userId(),
-      name: trimmed,
-      color: nextColor(),
-      is_self: false,
-    });
+  /* ----- Profile ----- */
+  async updateProfile({ displayName, color }) {
+    const u = userId();
+    if (!u) return;
+    const patch = {};
+    if (displayName !== undefined) patch.display_name = displayName.trim();
+    if (color !== undefined) patch.color = color;
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await supabase.from("profiles").update(patch).eq("id", u);
     if (error) return console.error(error);
-    await logEvent("person_added", `${me?.name ?? "Someone"} added ${trimmed}`);
     await refresh();
   },
 
-  async updatePerson(id, name) {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    const old = _state.people.find((p) => p.id === id);
-    if (!old || old.name === trimmed) return;
-    const me = currentPerson(_state);
-    const { error } = await supabase.from("people").update({ name: trimmed }).eq("id", id);
-    if (error) return console.error(error);
-    await logEvent("person_renamed", `${me?.name ?? "Someone"} renamed ${old.name} → ${trimmed}`, { personId: id });
-    await refresh();
+  /* ----- Member picker support ----- */
+  // Returns the matching profile or null. Exact email match only.
+  async findUserByEmail(email) {
+    const e = email.trim().toLowerCase();
+    if (!e) return null;
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .ilike("email", e)
+      .maybeSingle();
+    if (error) {
+      console.error(error);
+      return null;
+    }
+    return data ? mapProfile(data) : null;
   },
 
-  async deletePerson(id) {
-    const old = _state.people.find((p) => p.id === id);
-    if (!old || old.isSelf) return;
-    const me = currentPerson(_state);
-    const { error } = await supabase.from("people").delete().eq("id", id);
-    if (error) return console.error(error);
-    await logEvent("person_deleted", `${me?.name ?? "Someone"} removed ${old.name}`, { personId: id });
-    await refresh();
-  },
-
-  async addGroup(name, memberIds, emoji = "👥") {
+  /* ----- Groups ----- */
+  async addGroup(name, emoji = "👥") {
     const trimmed = name.trim();
-    if (!trimmed || !memberIds?.length) return;
-    const me = currentPerson(_state);
+    if (!trimmed) return null;
+    const u = userId();
+    if (!u) return null;
+    const me = _state.profile;
+
+    // 1. Create group
     const { data: group, error } = await supabase
       .from("groups")
-      .insert({ owner_id: userId(), name: trimmed, emoji })
+      .insert({ name: trimmed, emoji, created_by: u })
       .select()
       .single();
-    if (error) return console.error(error);
+    if (error) {
+      console.error(error);
+      return null;
+    }
 
-    const rows = memberIds.map((person_id) => ({ group_id: group.id, person_id }));
-    const { error: mErr } = await supabase.from("group_members").insert(rows);
-    if (mErr) return console.error(mErr);
+    // 2. Add self as the first member (so RLS sees us as a member)
+    const { error: mErr } = await supabase.from("group_members").insert({
+      group_id: group.id,
+      user_id: u,
+      display_name: me?.displayName ?? "Me",
+      color: me?.color ?? "#10b981",
+      added_by: u,
+    });
+    if (mErr) console.error(mErr);
 
-    await logEvent("group_created", `${me?.name ?? "Someone"} created group "${trimmed}"`, { groupId: group.id });
+    await logEvent(group.id, "group_created", `${me?.displayName ?? "Someone"} created group "${trimmed}"`);
     await refresh();
+    return group.id;
   },
 
   async deleteGroup(id) {
     const old = _state.groups.find((g) => g.id === id);
     if (!old) return;
-    const me = currentPerson(_state);
+    const me = _state.profile;
     const { error } = await supabase.from("groups").delete().eq("id", id);
     if (error) return console.error(error);
-    await logEvent("group_deleted", `${me?.name ?? "Someone"} deleted group "${old.name}"`, { groupId: id });
+    // Group is gone — log a personal event (group_id null) so it shows up somewhere
+    await logEvent(null, "group_deleted", `${me?.displayName ?? "Someone"} deleted group "${old.name}"`);
     await refresh();
   },
 
+  /* ----- Members ----- */
+  async addRegisteredMember(groupId, userIdToAdd, profile) {
+    const u = userId();
+    const me = _state.profile;
+    const { error } = await supabase.from("group_members").insert({
+      group_id: groupId,
+      user_id: userIdToAdd,
+      display_name: profile.displayName,
+      color: profile.color,
+      added_by: u,
+    });
+    if (error) {
+      if (error.code === "23505") throw new Error(`${profile.displayName} is already in this group`);
+      throw error;
+    }
+    const group = _state.groups.find((g) => g.id === groupId);
+    await logEvent(groupId, "member_added",
+      `${me?.displayName ?? "Someone"} added ${profile.displayName} to ${group?.name ?? "the group"}`);
+    // Notify the added user
+    await supabase.from("notifications").insert({
+      user_id: userIdToAdd,
+      message: `${me?.displayName ?? "Someone"} added you to "${group?.name ?? "a group"}"`,
+      group_id: groupId,
+    });
+    await refresh();
+  },
+
+  async addContactMember(groupId, name) {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Name is required");
+    const u = userId();
+    const me = _state.profile;
+    const group = _state.groups.find((g) => g.id === groupId);
+    const seed = (group?.members?.length ?? 0) + 1;
+    const { error } = await supabase.from("group_members").insert({
+      group_id: groupId,
+      user_id: null,
+      display_name: trimmed,
+      color: pickColor(seed),
+      added_by: u,
+    });
+    if (error) throw error;
+    await logEvent(groupId, "member_added",
+      `${me?.displayName ?? "Someone"} added contact "${trimmed}" to ${group?.name ?? "the group"}`);
+    await refresh();
+  },
+
+  async removeMember(memberId) {
+    const me = _state.profile;
+    let memberDescriptor = null;
+    let groupId = null;
+    for (const g of _state.groups) {
+      const m = g.members.find((x) => x.id === memberId);
+      if (m) { memberDescriptor = m; groupId = g.id; break; }
+    }
+    if (!memberDescriptor) return;
+    const { error } = await supabase.from("group_members").delete().eq("id", memberId);
+    if (error) return console.error(error);
+    await logEvent(groupId, "member_removed",
+      `${me?.displayName ?? "Someone"} removed ${memberDescriptor.displayName} from the group`);
+    await refresh();
+  },
+
+  /* ----- Expenses ----- */
   async addExpense({ groupId, description, amount, paidBy, splitBetween }) {
     const desc = description.trim();
     const amt = Number(amount);
     if (!desc || !(amt > 0) || !splitBetween?.length || !groupId || !paidBy) return;
+    const u = userId();
 
     const { data: expense, error } = await supabase
       .from("expenses")
       .insert({
-        owner_id: userId(),
         group_id: groupId,
         description: desc,
         amount: amt,
-        paid_by: paidBy,
+        paid_by_member_id: paidBy,
         type: "expense",
+        created_by: u,
       })
       .select()
       .single();
     if (error) return console.error(error);
 
-    const splitRows = splitBetween.map((person_id) => ({ expense_id: expense.id, person_id }));
+    const splitRows = splitBetween.map((member_id) => ({ expense_id: expense.id, member_id }));
     const { error: sErr } = await supabase.from("expense_splits").insert(splitRows);
-    if (sErr) return console.error(sErr);
+    if (sErr) console.error(sErr);
 
     const group = _state.groups.find((g) => g.id === groupId);
-    const payer = _state.people.find((p) => p.id === paidBy);
+    const payer = group?.members.find((m) => m.id === paidBy);
+    const me = _state.profile;
     const perHead = amt / splitBetween.length;
-    const me = currentPerson(_state);
 
+    // Notify each registered member who's in splitBetween (excluding payer)
     const notifRows = splitBetween
-      .filter((pid) => pid !== paidBy)
-      .map((pid) => ({
-        owner_id: userId(),
-        to_person_id: pid,
-        message: `${payer?.name ?? "Someone"} added "${desc}" in ${group?.name ?? "a group"}. You owe ₹${perHead.toFixed(2)}`,
+      .map((mid) => group?.members.find((m) => m.id === mid))
+      .filter((m) => m && m.userId && m.id !== paidBy)
+      .map((m) => ({
+        user_id: m.userId,
+        message: `${payer?.displayName ?? "Someone"} added "${desc}" in ${group?.name ?? "a group"}. Your share: ₹${perHead.toFixed(2)}`,
         group_id: groupId,
       }));
     if (notifRows.length) await supabase.from("notifications").insert(notifRows);
 
     await logEvent(
+      groupId,
       "expense_added",
-      `${me?.name ?? payer?.name ?? "Someone"} added "${desc}" (₹${amt}) in ${group?.name ?? "a group"} — split ${splitBetween.length} ways`,
-      { expenseId: expense.id, groupId, amount: amt }
+      `${me?.displayName ?? payer?.displayName ?? "Someone"} added "${desc}" (₹${amt}) — split ${splitBetween.length} ways`,
+      { expenseId: expense.id, amount: amt }
     );
     await refresh();
   },
@@ -356,25 +458,28 @@ export const actions = {
   async deleteExpense(id) {
     const old = _state.expenses.find((e) => e.id === id);
     if (!old) return;
-    const me = currentPerson(_state);
+    const me = _state.profile;
     const { error } = await supabase.from("expenses").delete().eq("id", id);
     if (error) return console.error(error);
-    await logEvent("expense_deleted", `${me?.name ?? "Someone"} deleted "${old.description}" (₹${old.amount})`, { expenseId: id });
+    await logEvent(old.groupId, "expense_deleted",
+      `${me?.displayName ?? "Someone"} deleted "${old.description}" (₹${old.amount})`);
     await refresh();
   },
 
   async settleUp({ groupId, fromId, toId, amount }) {
     const amt = Number(amount);
     if (!(amt > 0) || !fromId || !toId) return;
-    const { data: expense, error } = await supabase
+    const u = userId();
+
+    const { data: settlement, error } = await supabase
       .from("expenses")
       .insert({
-        owner_id: userId(),
         group_id: groupId,
         description: "Settlement",
         amount: amt,
-        paid_by: fromId,
+        paid_by_member_id: fromId,
         type: "settlement",
+        created_by: u,
       })
       .select()
       .single();
@@ -382,116 +487,124 @@ export const actions = {
 
     const { error: sErr } = await supabase
       .from("expense_splits")
-      .insert([{ expense_id: expense.id, person_id: toId }]);
-    if (sErr) return console.error(sErr);
+      .insert([{ expense_id: settlement.id, member_id: toId }]);
+    if (sErr) console.error(sErr);
 
-    const from = _state.people.find((p) => p.id === fromId);
-    const to = _state.people.find((p) => p.id === toId);
     const group = _state.groups.find((g) => g.id === groupId);
-    const me = currentPerson(_state);
+    const from = group?.members.find((m) => m.id === fromId);
+    const to = group?.members.find((m) => m.id === toId);
+    const me = _state.profile;
 
-    await supabase.from("notifications").insert({
-      owner_id: userId(),
-      to_person_id: toId,
-      message: `${from?.name ?? "Someone"} paid you ₹${amt.toFixed(2)}`,
-      group_id: groupId,
-    });
+    if (to?.userId) {
+      await supabase.from("notifications").insert({
+        user_id: to.userId,
+        message: `${from?.displayName ?? "Someone"} marked ₹${amt.toFixed(2)} as paid to you in "${group?.name ?? "a group"}"`,
+        group_id: groupId,
+      });
+    }
 
     await logEvent(
+      groupId,
       "settlement_added",
-      `${me?.name ?? from?.name ?? "Someone"} marked ${from?.name} → ${to?.name} as paid (₹${amt}) in ${group?.name ?? "a group"}`,
-      { fromId, toId, amount: amt, groupId }
+      `${me?.displayName ?? from?.displayName ?? "Someone"} marked ${from?.displayName} → ${to?.displayName} as paid (₹${amt})`
     );
     await refresh();
   },
 
-  async markNotificationsRead(personId) {
+  async markNotificationsRead() {
+    const u = userId();
+    if (!u) return;
     await supabase
       .from("notifications")
       .update({ read: true })
-      .eq("owner_id", userId())
-      .eq("to_person_id", personId)
+      .eq("user_id", u)
       .eq("read", false);
-    await refresh();
-  },
-
-  async resetAll() {
-    const uid = userId();
-    if (!uid) return;
-    // Delete in dependency order. RLS scopes deletes to this user.
-    await supabase.from("expenses").delete().eq("owner_id", uid); // cascades expense_splits
-    await supabase.from("groups").delete().eq("owner_id", uid);   // cascades group_members
-    await supabase.from("notifications").delete().eq("owner_id", uid);
-    await supabase.from("events").delete().eq("owner_id", uid);
-    // Keep self-person; delete other contacts
-    await supabase.from("people").delete().eq("owner_id", uid).eq("is_self", false);
     await refresh();
   },
 };
 
-/* ---------- Balance engine (unchanged) ---------- */
+/* ---------- Balance engine (member-id space) ---------- */
 
+// {memberId: balance}; positive = is owed, negative = owes
 export function groupBalances(state, groupId) {
   const exps = state.expenses.filter((e) => e.groupId === groupId);
   const balances = {};
   for (const e of exps) {
+    if (!e.splitBetween.length) continue;
     const share = e.amount / e.splitBetween.length;
     balances[e.paidBy] = (balances[e.paidBy] || 0) + e.amount;
-    for (const pid of e.splitBetween) balances[pid] = (balances[pid] || 0) - share;
+    for (const mid of e.splitBetween) balances[mid] = (balances[mid] || 0) - share;
   }
   return balances;
 }
 
 export function simplifyDebts(balances) {
-  const creditors = [];
-  const debtors = [];
+  const creditors = [], debtors = [];
   for (const [id, bal] of Object.entries(balances)) {
     if (bal > 0.01) creditors.push({ id, amt: bal });
     else if (bal < -0.01) debtors.push({ id, amt: -bal });
   }
   creditors.sort((a, b) => b.amt - a.amt);
   debtors.sort((a, b) => b.amt - a.amt);
-
-  const transactions = [];
+  const tx = [];
   let i = 0, j = 0;
   while (i < debtors.length && j < creditors.length) {
     const pay = Math.min(debtors[i].amt, creditors[j].amt);
-    transactions.push({ from: debtors[i].id, to: creditors[j].id, amount: pay });
+    tx.push({ from: debtors[i].id, to: creditors[j].id, amount: pay });
     debtors[i].amt -= pay;
     creditors[j].amt -= pay;
     if (debtors[i].amt < 0.01) i++;
     if (creditors[j].amt < 0.01) j++;
   }
-  return transactions;
+  return tx;
 }
 
-export function userTotalsAcrossGroups(state, userId) {
-  let owe = 0, owed = 0;
-  const perPerson = {};
-  for (const g of state.groups) {
-    if (!g.memberIds.includes(userId)) continue;
-    const txs = simplifyDebts(groupBalances(state, g.id));
-    for (const t of txs) {
-      if (t.from === userId) {
-        owe += t.amount;
-        perPerson[t.to] = (perPerson[t.to] || 0) - t.amount;
-      } else if (t.to === userId) {
-        owed += t.amount;
-        perPerson[t.from] = (perPerson[t.from] || 0) + t.amount;
-      }
-    }
-  }
-  return { owe, owed, net: owed - owe, perPerson };
-}
-
+// Per-group net for the current user (positive = is owed, negative = owes)
 export function userGroupNet(state, userId, groupId) {
+  const g = state.groups.find((x) => x.id === groupId);
+  if (!g) return 0;
+  const myMember = g.members.find((m) => m.userId === userId);
+  if (!myMember) return 0;
   const txs = simplifyDebts(groupBalances(state, groupId));
   let net = 0;
   for (const t of txs) {
-    if (t.from === userId) net -= t.amount;
-    else if (t.to === userId) net += t.amount;
+    if (t.from === myMember.id) net -= t.amount;
+    else if (t.to === myMember.id) net += t.amount;
   }
   return net;
+}
+
+// Aggregates across all groups for the current user.
+// `perPerson` is keyed by either userId (registered member) or contact key
+// (= `c:${groupId}:${memberId}`). For the Home view we only show registered users
+// in the per-person breakdown so they aggregate naturally; contacts stay per-group.
+export function userTotalsAcrossGroups(state, userId) {
+  let owe = 0, owed = 0;
+  const perUser = {}; // userId -> {amount, displayName, color}
+  for (const g of state.groups) {
+    const myMember = g.members.find((m) => m.userId === userId);
+    if (!myMember) continue;
+    const txs = simplifyDebts(groupBalances(state, g.id));
+    for (const t of txs) {
+      const otherId = t.from === myMember.id ? t.to : t.to === myMember.id ? t.from : null;
+      if (!otherId) continue;
+      const other = g.members.find((m) => m.id === otherId);
+      if (t.from === myMember.id) {
+        owe += t.amount;
+        if (other?.userId) {
+          perUser[other.userId] ??= { amount: 0, displayName: other.displayName, color: other.color };
+          perUser[other.userId].amount -= t.amount;
+        }
+      } else {
+        owed += t.amount;
+        if (other?.userId) {
+          perUser[other.userId] ??= { amount: 0, displayName: other.displayName, color: other.color };
+          perUser[other.userId].amount += t.amount;
+        }
+      }
+    }
+  }
+  return { owe, owed, net: owed - owe, perUser };
 }
 
 export function fmt(amount) {
@@ -501,17 +614,13 @@ export function fmt(amount) {
 
 export function eventIcon(type) {
   switch (type) {
-    case "account_created": return "🎉";
-    case "signed_in": return "🔓";
-    case "signed_out": return "🔒";
-    case "person_added": return "👤";
-    case "person_renamed": return "✏️";
-    case "person_deleted": return "🗑️";
-    case "group_created": return "👥";
-    case "group_deleted": return "🗑️";
-    case "expense_added": return "💸";
-    case "expense_deleted": return "🗑️";
-    case "settlement_added": return "✅";
-    default: return "•";
+    case "group_created":     return "👥";
+    case "group_deleted":     return "🗑️";
+    case "member_added":      return "➕";
+    case "member_removed":    return "➖";
+    case "expense_added":     return "💸";
+    case "expense_deleted":   return "🗑️";
+    case "settlement_added":  return "✅";
+    default:                  return "•";
   }
 }
