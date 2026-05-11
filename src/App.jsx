@@ -13,7 +13,7 @@ import {
   eventIcon,
 } from "./store";
 import { Avatar, Card, Button, Modal, Field, Input, EmptyState, Badge } from "./components";
-import { LoginScreen } from "./auth";
+import { LoginScreen, UpdatePasswordScreen } from "./auth";
 
 export default function App() {
   const state = useStore();
@@ -21,6 +21,7 @@ export default function App() {
   const [view, setView] = useState({ name: "home" });
 
   if (state.loading && !state.session) return <SplashLoader label="Loading…" />;
+  if (state.passwordRecovery) return <UpdatePasswordScreen />;
   if (!state.session) return <LoginScreen />;
   if (!me) {
     if (state.error) return <SetupError message={state.error} />;

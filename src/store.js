@@ -35,6 +35,7 @@ let _state = {
   notifications: [],
   loading: true,
   error: null,
+  passwordRecovery: false,
 };
 
 const _subs = new Set();
@@ -94,6 +95,25 @@ export const auth = {
 
   async signOut() {
     await supabase.auth.signOut();
+  },
+
+  async requestPasswordReset(email) {
+    email = (email ?? "").trim().toLowerCase();
+    if (!email) throw new Error("Email is required");
+    const redirectTo = window.location.origin + (import.meta.env.BASE_URL ?? "/");
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) throw error;
+  },
+
+  async updatePassword(newPassword) {
+    if (!newPassword || newPassword.length < 6) throw new Error("Password must be at least 6 characters");
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+    setState((s) => ({ ...s, passwordRecovery: false }));
+  },
+
+  clearPasswordRecovery() {
+    setState((s) => ({ ...s, passwordRecovery: false }));
   },
 };
 
@@ -173,8 +193,12 @@ supabase.auth.getSession().then(({ data: { session } }) => {
   else setState((s) => ({ ...s, loading: false }));
 });
 
-supabase.auth.onAuthStateChange((_event, session) => {
-  setState((s) => ({ ...s, session }));
+supabase.auth.onAuthStateChange((event, session) => {
+  setState((s) => ({
+    ...s,
+    session,
+    passwordRecovery: event === "PASSWORD_RECOVERY" ? true : s.passwordRecovery,
+  }));
   if (session?.user) loadAll(session.user.id);
   else clearData();
 });
