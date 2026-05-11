@@ -26,6 +26,12 @@ import { supabase } from "./supabase";
  *              userTotalsAcrossGroups, userGroupNet
  * ========================================================= */
 
+function _hashHasRecoveryToken() {
+  if (typeof window === "undefined") return false;
+  const h = window.location.hash || "";
+  return h.includes("type=recovery") || (h.includes("access_token=") && h.includes("recovery"));
+}
+
 let _state = {
   session: null,
   profile: null,        // own profile {id, email, displayName, color}
@@ -35,7 +41,7 @@ let _state = {
   notifications: [],
   loading: true,
   error: null,
-  passwordRecovery: false,
+  passwordRecovery: _hashHasRecoveryToken(),
 };
 
 const _subs = new Set();
@@ -110,6 +116,9 @@ export const auth = {
     const { error } = await supabase.auth.updateUser({ password: newPassword });
     if (error) throw error;
     setState((s) => ({ ...s, passwordRecovery: false }));
+    if (typeof window !== "undefined" && window.location.hash) {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
   },
 
   clearPasswordRecovery() {
