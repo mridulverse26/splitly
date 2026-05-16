@@ -9,7 +9,7 @@ import {
   simplifyDebts,
   userTotalsAcrossGroups,
   userGroupNet,
-  perPersonBreakdown,
+  perPersonTimeline,
   fmt,
   eventIcon,
 } from "./store";
@@ -264,88 +264,115 @@ function Home({ state, me, onOpenGroup, onGoGroups }) {
 }
 
 function PersonBreakdownModal({ open, onClose, other, state, me }) {
-  const breakdown = useMemo(
-    () => (open && other ? perPersonBreakdown(state, me.id, other.userId) : null),
+  const timeline = useMemo(
+    () => (open && other ? perPersonTimeline(state, me.id, other.userId) : null),
     [open, other, state, me.id]
   );
   if (!other) return null;
-  const owesYou = breakdown && breakdown.net > 0;
-  const settled = breakdown && Math.abs(breakdown.net) < 0.01;
+  const net = timeline?.net ?? 0;
+  const owesYou = net > 0.01;
+  const youOwe = net < -0.01;
+  const settled = Math.abs(net) < 0.01;
+  const statusText = settled
+    ? "All settled up"
+    : owesYou
+    ? `${other.displayName} owes you ${fmt(net)}`
+    : `You owe ${other.displayName} ${fmt(net)}`;
+
   return (
     <Modal open={open} onClose={onClose} title={`With ${other.displayName}`}>
       <div className="flex items-center gap-3 mb-4 -mt-1">
         <Avatar person={{ id: other.userId, name: other.displayName, color: other.color }} size={44} />
         <div className="flex-1 min-w-0">
           <div className="font-semibold truncate">{other.displayName}</div>
-          <div className="text-xs text-slate-500">
-            {settled
-              ? "All settled up"
-              : owesYou
-              ? `Owes you ${fmt(breakdown.net)}`
-              : `You owe ${fmt(breakdown.net)}`}
-          </div>
+          <div className="text-xs text-slate-500">{statusText}</div>
         </div>
-        {breakdown && (
-          <div className={`text-xl font-bold ${settled ? "text-slate-500" : owesYou ? "text-accent-600" : "text-red-500"}`}>
-            {settled ? fmt(0) : `${breakdown.net >= 0 ? "+" : "-"}${fmt(breakdown.net)}`}
-          </div>
-        )}
+        <div className={`text-xl font-bold shrink-0 ${settled ? "text-slate-500" : owesYou ? "text-accent-600" : "text-red-500"}`}>
+          {settled ? fmt(0) : `${owesYou ? "+" : "−"}${fmt(net)}`}
+        </div>
       </div>
 
-      {!breakdown || breakdown.groups.length === 0 ? (
+      {!timeline || timeline.steps.length === 0 ? (
         <EmptyState
           icon="🤝"
           title="No shared activity"
           subtitle={`No expenses or settlements between you and ${other.displayName} yet.`}
         />
       ) : (
-        <div className="space-y-4">
-          {breakdown.groups.map((g) => (
-            <div key={g.id}>
-              <div className="flex items-center gap-2 mb-2 px-1">
-                <span className="text-lg">{g.emoji ?? "👥"}</span>
-                <span className="font-semibold text-sm flex-1 truncate">{g.name}</span>
-                <span className={`text-xs font-bold ${Math.abs(g.net) < 0.01 ? "text-slate-500" : g.net > 0 ? "text-accent-600" : "text-red-500"}`}>
-                  {Math.abs(g.net) < 0.01 ? "settled" : `${g.net >= 0 ? "+" : "-"}${fmt(g.net)}`}
-                </span>
-              </div>
-              {g.items.length === 0 ? (
-                <div className="text-xs text-slate-400 px-1 pb-1">
-                  No direct transactions — this net comes from balancing through other group members.
-                </div>
-              ) : (
-                <Card className="divide-y divide-slate-100">
-                  {g.items.map((it) => {
-                    const isSettle = it.kind === "settlement-in" || it.kind === "settlement-out";
-                    return (
-                      <div key={it.id} className="p-3 flex items-start gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${isSettle ? "bg-accent-50 text-accent-600" : "bg-slate-100"}`}>
-                          {isSettle ? (
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-                          ) : (
-                            <span className="text-sm">💸</span>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm leading-snug">{it.text}</div>
-                          {it.subtext && <div className="text-xs text-slate-500 mt-0.5">{it.subtext}</div>}
-                          <div className="text-[10px] text-slate-400 mt-0.5">{new Date(it.date).toLocaleDateString()}</div>
-                        </div>
-                        <div className={`text-sm font-bold text-right shrink-0 ${it.impact >= 0 ? "text-accent-600" : "text-red-500"}`}>
-                          {it.impact >= 0 ? "+" : "-"}{fmt(it.impact)}
-                        </div>
+        <>
+          <div className="text-[11px] text-slate-400 px-1 mb-3 -mt-1">
+            {timeline.steps.length} {timeline.steps.length === 1 ? "step" : "steps"} · oldest first
+          </div>
+          <div className="px-1">
+            {timeline.steps.map((s, idx) => {
+              const isLast = idx === timeline.steps.length - 1;
+              const isSettlement = s.kind === "settlement";
+              const settledHere = Math.abs(s.runningAfter) < 0.01;
+              const runningText = settledHere
+                ? "Settled ✓"
+                : s.runningAfter > 0
+                ? `${other.displayName} owes you ${fmt(s.runningAfter)}`
+                : `You owe ${other.displayName} ${fmt(Math.abs(s.runningAfter))}`;
+              return (
+                <div key={s.id} className="flex gap-3">
+                  <div className="flex flex-col items-center shrink-0">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                      isSettlement
+                        ? "bg-accent-100 text-accent-700 ring-2 ring-accent-200"
+                        : "bg-slate-100 text-slate-600"
+                    }`}>
+                      {isSettlement ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                      ) : (
+                        s.step
+                      )}
+                    </div>
+                    {!isLast && <div className="w-px flex-1 bg-slate-200 my-1" />}
+                  </div>
+                  <div className={`flex-1 min-w-0 ${isLast ? "pb-1" : "pb-5"}`}>
+                    <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">
+                      {new Date(s.ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} · <span className="text-slate-500">{s.groupEmoji} {s.groupName}</span>
+                    </div>
+                    <div className="flex items-start gap-2 mt-1">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm leading-snug">{s.text}</div>
+                        {s.subtext && <div className="text-xs text-slate-500 mt-0.5">{s.subtext}</div>}
                       </div>
-                    );
-                  })}
-                </Card>
-              )}
+                      <div className={`text-sm font-bold shrink-0 ${s.impact >= 0 ? "text-accent-600" : "text-red-500"}`}>
+                        {s.impact >= 0 ? "+" : "−"}{fmt(s.impact)}
+                      </div>
+                    </div>
+                    <div className={`mt-2 inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-lg ${
+                      settledHere
+                        ? "bg-accent-50 text-accent-700"
+                        : s.runningAfter > 0
+                        ? "bg-accent-50 text-accent-700"
+                        : "bg-red-50 text-red-600"
+                    }`}>
+                      <span className="text-slate-400">→</span> {runningText}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className={`mt-2 rounded-xl p-4 text-center ${
+            settled ? "bg-slate-100" : owesYou ? "bg-accent-50" : "bg-red-50"
+          }`}>
+            <div className="text-[10px] uppercase tracking-wide font-semibold text-slate-500">Total</div>
+            <div className={`text-lg font-bold mt-0.5 ${
+              settled ? "text-slate-600" : owesYou ? "text-accent-700" : "text-red-600"
+            }`}>
+              {statusText}
             </div>
-          ))}
-          <p className="text-[11px] text-slate-400 text-center px-1 pt-1 leading-relaxed">
-            <span className="text-accent-600 font-semibold">+</span> means {other.displayName} owes you ·{" "}
-            <span className="text-red-500 font-semibold">−</span> means you owe {other.displayName}
+          </div>
+
+          <p className="text-[11px] text-slate-400 text-center px-1 pt-3 leading-relaxed">
+            <span className="text-accent-600 font-semibold">+</span> adds to what {other.displayName} owes you ·{" "}
+            <span className="text-red-500 font-semibold">−</span> reduces it (or means you owe {other.displayName})
           </p>
-        </div>
+        </>
       )}
     </Modal>
   );
