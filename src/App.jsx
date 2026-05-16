@@ -7,6 +7,8 @@ import {
   myMemberInGroup,
   groupBalances,
   simplifyDebts,
+  pairwiseDebtsInGroup,
+  pairwiseEdgesInGroup,
   userTotalsAcrossGroups,
   userGroupNet,
   perPersonTimeline,
@@ -490,7 +492,14 @@ function GroupDetail({ state, groupId, me, onBack }) {
     [state.expenses, groupId, group]
   );
   const balances = useMemo(() => (group ? groupBalances(state, groupId) : {}), [state, groupId, group]);
-  const settlements = useMemo(() => simplifyDebts(balances), [balances]);
+  const simplifiedHint = useMemo(() => simplifyDebts(balances), [balances]);
+  const pairwiseEdges = useMemo(() => (group ? pairwiseEdgesInGroup(state, groupId) : []), [state, groupId, group]);
+  const myMemberForDebts = group?.members.find((m) => m.userId === me.id);
+  const myPairwise = useMemo(
+    () => (group && myMemberForDebts ? pairwiseDebtsInGroup(state, groupId, myMemberForDebts.id) : []),
+    [state, groupId, group, myMemberForDebts]
+  );
+  const myOpenDebts = useMemo(() => myPairwise.filter((d) => d.amount < -0.01), [myPairwise]);
 
   if (!group) {
     return (
@@ -550,7 +559,7 @@ function GroupDetail({ state, groupId, me, onBack }) {
           </div>
           <div className="flex gap-2 mt-3">
             <Button onClick={() => setShowAddExpense(true)} className="flex-1">+ Add expense</Button>
-            <Button variant="ghost" onClick={() => setShowSettle(true)} disabled={settlements.length === 0}>Settle up</Button>
+            <Button variant="ghost" onClick={() => setShowSettle(true)} disabled={myOpenDebts.length === 0}>Settle up</Button>
           </div>
         </Card>
       )}
@@ -593,13 +602,20 @@ function GroupDetail({ state, groupId, me, onBack }) {
         </Card>
       </div>
 
-      {settlements.length > 0 && (
+      {pairwiseEdges.length > 0 && (
         <div>
-          <div className="text-sm font-semibold text-slate-600 mb-2 px-1">Who owes whom</div>
+          <div className="flex items-center justify-between mb-2 px-1">
+            <div className="text-sm font-semibold text-slate-600">Who owes whom (direct)</div>
+            {simplifiedHint.length > 0 && simplifiedHint.length < pairwiseEdges.length && (
+              <div className="text-[11px] text-slate-400">
+                💡 could net out in {simplifiedHint.length}
+              </div>
+            )}
+          </div>
           <Card className="divide-y divide-slate-100">
-            {settlements.map((t, i) => {
-              const from = group.members.find((m) => m.id === t.from);
-              const to = group.members.find((m) => m.id === t.to);
+            {pairwiseEdges.map((t, i) => {
+              const from = group.members.find((m) => m.id === t.fromMemberId);
+              const to = group.members.find((m) => m.id === t.toMemberId);
               return (
                 <div key={i} className="p-3 flex items-center gap-2 text-sm">
                   <Avatar person={memberToPerson(from)} size={28} />
@@ -612,6 +628,9 @@ function GroupDetail({ state, groupId, me, onBack }) {
               );
             })}
           </Card>
+          <div className="text-[11px] text-slate-400 px-1 mt-1.5">
+            Pairwise truth: each row is a real debt from one expense, not a routed suggestion.
+          </div>
         </div>
       )}
 
@@ -627,7 +646,7 @@ function GroupDetail({ state, groupId, me, onBack }) {
       </div>
 
       <AddExpenseModal open={showAddExpense} onClose={() => setShowAddExpense(false)} group={group} me={me} />
-      <SettleUpModal open={showSettle} onClose={() => setShowSettle(false)} settlements={settlements} group={group} groupId={groupId} />
+      <SettleUpModal open={showSettle} onClose={() => setShowSettle(false)} myOpenDebts={myOpenDebts} myMember={myMember} group={group} groupId={groupId} />
       <AddMemberModal open={showAddMember} onClose={() => setShowAddMember(false)} group={group} />
       <EditGroupModal open={showEditGroup} onClose={() => setShowEditGroup(false)} group={group} />
       <EditMemberModal
@@ -881,30 +900,70 @@ function AddExpenseModal({ open, onClose, group, me }) {
   );
 }
 
-function SettleUpModal({ open, onClose, settlements, group, groupId }) {
+function SettleUpModal({ open, onClose, myOpenDebts, myMember, group, groupId }) {
+  const [busy, setBusy] = useState(false);
+
+  const settleOne = async (creditorId, amount) => {
+    if (!myMember || busy) return;
+    setBusy(true);
+    try {
+      await actions.settleUp({ groupId, fromId: myMember.id, toId: creditorId, amount });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const settleAll = async () => {
+    if (!myMember || busy) return;
+    setBusy(true);
+    try {
+      for (const d of myOpenDebts) {
+        await actions.settleUp({ groupId, fromId: myMember.id, toId: d.otherMemberId, amount: -d.amount });
+      }
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const total = myOpenDebts.reduce((s, d) => s + -d.amount, 0);
+
   return (
     <Modal open={open} onClose={onClose} title="Settle up">
-      {settlements.length === 0 ? (
-        <div className="text-sm text-slate-500 py-2">All settled — nothing to pay.</div>
+      {myOpenDebts.length === 0 ? (
+        <div className="text-sm text-slate-500 py-2">You're all settled — no one to pay.</div>
       ) : (
-        <div className="space-y-2">
-          {settlements.map((t, i) => {
-            const from = group.members.find((m) => m.id === t.from);
-            const to = group.members.find((m) => m.id === t.to);
-            return (
-              <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                <Avatar person={memberToPerson(from)} size={32} />
-                <div className="text-sm flex-1">
-                  <span className="font-semibold">{from?.displayName}</span> → <span className="font-semibold">{to?.displayName}</span>
-                  <div className="text-xs text-slate-500">{fmt(t.amount)}</div>
+        <>
+          <div className="text-xs text-slate-500 mb-3">
+            Pay each person directly — what you see is what you split.
+          </div>
+          <div className="space-y-2">
+            {myOpenDebts.map((d) => {
+              const to = group.members.find((m) => m.id === d.otherMemberId);
+              const amt = -d.amount;
+              return (
+                <div key={d.otherMemberId} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                  <Avatar person={memberToPerson(to)} size={32} />
+                  <div className="text-sm flex-1 min-w-0">
+                    <div className="truncate">Pay <span className="font-semibold">{to?.displayName}</span></div>
+                    <div className="text-xs text-slate-500">{fmt(amt)}</div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    onClick={() => settleOne(d.otherMemberId, amt)}
+                    disabled={busy}
+                    className="text-xs px-3 py-1.5"
+                  >Mark paid</Button>
                 </div>
-                <Button variant="ghost"
-                  onClick={() => actions.settleUp({ groupId, fromId: t.from, toId: t.to, amount: t.amount })}
-                  className="text-xs px-3 py-1.5">Mark paid</Button>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+          {myOpenDebts.length > 1 && (
+            <Button onClick={settleAll} disabled={busy} className="w-full mt-3">
+              Mark all paid ({fmt(total)})
+            </Button>
+          )}
+        </>
       )}
     </Modal>
   );

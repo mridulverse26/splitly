@@ -681,6 +681,85 @@ export function simplifyDebts(balances) {
   return tx;
 }
 
+// Per-group pairwise debts for one member. Returns [{ otherMemberId, amount }]
+// where amount > 0 means the other member owes me, < 0 means I owe them. No
+// simplification routing — these are the real direct edges. Used by Settle Up
+// and "who owes whom" displays.
+export function pairwiseDebtsInGroup(state, groupId, memberId) {
+  const exps = state.expenses.filter((e) => e.groupId === groupId);
+  const edges = {};
+  for (const e of exps) {
+    if (e.type === "settlement") {
+      const toId = e.splitBetween[0];
+      if (e.paidBy === memberId && toId && toId !== memberId) {
+        edges[toId] = (edges[toId] || 0) + e.amount;
+      } else if (toId === memberId && e.paidBy !== memberId) {
+        edges[e.paidBy] = (edges[e.paidBy] || 0) - e.amount;
+      }
+      continue;
+    }
+    if (!e.splitBetween.length) continue;
+    const share = e.amount / e.splitBetween.length;
+    if (e.paidBy === memberId) {
+      for (const mid of e.splitBetween) {
+        if (mid === memberId) continue;
+        edges[mid] = (edges[mid] || 0) + share;
+      }
+    } else if (e.splitBetween.includes(memberId)) {
+      edges[e.paidBy] = (edges[e.paidBy] || 0) - share;
+    }
+  }
+  const out = [];
+  for (const [otherMemberId, amount] of Object.entries(edges)) {
+    if (Math.abs(amount) < 0.01) continue;
+    out.push({ otherMemberId, amount });
+  }
+  out.sort((a, b) => a.amount - b.amount);
+  return out;
+}
+
+// All pairwise edges in a group (group-wide "who owes whom" truth, no routing).
+// Returns [{ fromMemberId, toMemberId, amount }] where amount > 0 always.
+export function pairwiseEdgesInGroup(state, groupId) {
+  const exps = state.expenses.filter((e) => e.groupId === groupId);
+  const edges = {};
+  const key = (a, b) => `${a}|${b}`;
+  const add = (debtor, creditor, amt) => {
+    edges[key(debtor, creditor)] = (edges[key(debtor, creditor)] || 0) + amt;
+  };
+  for (const e of exps) {
+    if (e.type === "settlement") {
+      const toId = e.splitBetween[0];
+      if (toId && e.paidBy !== toId) {
+        add(toId, e.paidBy, e.amount);
+      }
+      continue;
+    }
+    if (!e.splitBetween.length) continue;
+    const share = e.amount / e.splitBetween.length;
+    for (const mid of e.splitBetween) {
+      if (mid === e.paidBy) continue;
+      add(mid, e.paidBy, share);
+    }
+  }
+  const out = [];
+  const seen = new Set();
+  for (const k of Object.keys(edges)) {
+    if (seen.has(k)) continue;
+    const [a, b] = k.split("|");
+    const ab = edges[key(a, b)] || 0;
+    const ba = edges[key(b, a)] || 0;
+    seen.add(key(a, b));
+    seen.add(key(b, a));
+    const net = ab - ba;
+    if (Math.abs(net) < 0.01) continue;
+    if (net > 0) out.push({ fromMemberId: a, toMemberId: b, amount: net });
+    else out.push({ fromMemberId: b, toMemberId: a, amount: -net });
+  }
+  out.sort((a, b) => b.amount - a.amount);
+  return out;
+}
+
 // Per-group net for the current user (positive = is owed, negative = owes)
 export function userGroupNet(state, userId, groupId) {
   const g = state.groups.find((x) => x.id === groupId);
@@ -711,11 +790,13 @@ export function userTotalsAcrossGroups(state, userId) {
     const exps = state.expenses.filter((e) => e.groupId === g.id);
     for (const e of exps) {
       if (e.type === "settlement") {
+        // Convention: directByMember[other] > 0 means other owes me.
+        // I paid them → my debt to them cleared → they "owe me" more (or I owe them less).
         const toId = e.splitBetween[0];
         if (e.paidBy === myMember.id && toId && toId !== myMember.id) {
-          directByMember[toId] = (directByMember[toId] || 0) - e.amount;
+          directByMember[toId] = (directByMember[toId] || 0) + e.amount;
         } else if (toId === myMember.id && e.paidBy !== myMember.id) {
-          directByMember[e.paidBy] = (directByMember[e.paidBy] || 0) + e.amount;
+          directByMember[e.paidBy] = (directByMember[e.paidBy] || 0) - e.amount;
         }
         continue;
       }
@@ -765,20 +846,22 @@ export function perPersonTimeline(state, myUserId, otherUserId) {
       };
 
       if (e.type === "settlement") {
+        // impact is the change in running balance (positive = they owe me more).
+        // I paid them → clears my debt → running goes up.
         const toId = e.splitBetween[0];
         if (e.paidBy === myMember.id && toId === otherMember.id) {
           items.push({
             ...base,
             kind: "settlement",
             text: `You paid ${otherMember.displayName} ${fmt(e.amount)} as a settlement`,
-            impact: -e.amount,
+            impact: e.amount,
           });
         } else if (e.paidBy === otherMember.id && toId === myMember.id) {
           items.push({
             ...base,
             kind: "settlement",
             text: `${otherMember.displayName} paid you ${fmt(e.amount)} as a settlement`,
-            impact: e.amount,
+            impact: -e.amount,
           });
         }
         continue;
