@@ -729,6 +729,92 @@ export function userTotalsAcrossGroups(state, userId) {
   return { owe, owed, net: owed - owe, perUser };
 }
 
+// Breakdown of every direct expense/settlement between me and another registered user,
+// grouped by group. Per-group `net` matches what Home shows (simplified-debt routing).
+export function perPersonBreakdown(state, myUserId, otherUserId) {
+  const groups = [];
+  let totalNet = 0;
+  for (const g of state.groups) {
+    const myMember = g.members.find((m) => m.userId === myUserId);
+    const otherMember = g.members.find((m) => m.userId === otherUserId);
+    if (!myMember || !otherMember) continue;
+
+    const txs = simplifyDebts(groupBalances(state, g.id));
+    let groupNet = 0;
+    for (const t of txs) {
+      if (t.from === myMember.id && t.to === otherMember.id) groupNet -= t.amount;
+      else if (t.from === otherMember.id && t.to === myMember.id) groupNet += t.amount;
+    }
+
+    const items = [];
+    const exps = state.expenses
+      .filter((e) => e.groupId === g.id)
+      .slice()
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    for (const e of exps) {
+      if (e.type === "settlement") {
+        const toId = e.splitBetween[0];
+        if (e.paidBy === myMember.id && toId === otherMember.id) {
+          items.push({
+            id: e.id,
+            kind: "settlement-out",
+            date: e.date,
+            text: `You paid ${otherMember.displayName} as a settlement`,
+            amount: e.amount,
+            impact: -e.amount,
+          });
+        } else if (e.paidBy === otherMember.id && toId === myMember.id) {
+          items.push({
+            id: e.id,
+            kind: "settlement-in",
+            date: e.date,
+            text: `${otherMember.displayName} paid you as a settlement`,
+            amount: e.amount,
+            impact: e.amount,
+          });
+        }
+        continue;
+      }
+
+      const share = e.amount / e.splitBetween.length;
+      if (e.paidBy === myMember.id && e.splitBetween.includes(otherMember.id)) {
+        items.push({
+          id: e.id,
+          kind: "i-paid",
+          date: e.date,
+          text: `You paid ${fmt(e.amount)} for "${e.description}", split ${e.splitBetween.length} ways`,
+          subtext: `${otherMember.displayName}'s share`,
+          amount: e.amount,
+          impact: share,
+        });
+      } else if (e.paidBy === otherMember.id && e.splitBetween.includes(myMember.id)) {
+        items.push({
+          id: e.id,
+          kind: "they-paid",
+          date: e.date,
+          text: `${otherMember.displayName} paid ${fmt(e.amount)} for "${e.description}", split ${e.splitBetween.length} ways`,
+          subtext: `Your share`,
+          amount: e.amount,
+          impact: -share,
+        });
+      }
+    }
+
+    if (items.length > 0 || Math.abs(groupNet) > 0.01) {
+      groups.push({
+        id: g.id,
+        name: g.name,
+        emoji: g.emoji,
+        net: groupNet,
+        items,
+      });
+      totalNet += groupNet;
+    }
+  }
+  return { groups, net: totalNet };
+}
+
 export function fmt(amount) {
   const n = Math.abs(amount);
   return `₹${n.toFixed(2).replace(/\.00$/, "")}`;
